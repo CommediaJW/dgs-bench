@@ -155,7 +155,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     throughput = batch_size * world_size / avg_iteration_time
     if rank == 0:
         print(
-            "Model GraphSAGE | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {} | Time per iteration {:2f} ms | Throughput {:.2f}"
+            "Model GraphSAGE | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {} | Time per iteration {:.2f} ms | Throughput {:.2f}"
             .format(hidden_dim, dataset, fan_out, batch_size, world_size,
                     avg_iteration_time * 1000, throughput))
 
