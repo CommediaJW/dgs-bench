@@ -124,8 +124,10 @@ def train(rank, world_size, graph, split_idx, num_classes, batch_size, fan_out,
                                                   use_ddp=True,
                                                   use_uva=True)
 
+    print("start training")
+
     time_log = []
-    for _ in range(10):
+    for _ in range(3):
         model.train()
 
         start = time.time()
@@ -151,7 +153,7 @@ def train(rank, world_size, graph, split_idx, num_classes, batch_size, fan_out,
 
             start = time.time()
 
-    avg_iteration_time = np.mean(time_log[:5])
+    avg_iteration_time = np.mean(time_log[1:])
     throughput = batch_size * world_size / avg_iteration_time
     if rank == 0:
         print(
@@ -197,13 +199,26 @@ if __name__ == '__main__':
             graph, num_classes = load_graph.load_ogb("ogbn-papers100M",
                                                      root=args.root)
         elif args.dataset == "ogbn-papers400M":
-            graph, num_classes = load_graph.load_papers400m(root=args.root)
+            graph, num_classes = load_graph.load_papers400m(
+                root=args.root, load_true_features=False)
     else:
         graph = None
         num_classes = None
 
-    graph, split_idx, num_classes = shared_graph.create_shared_graph(
-        graph, num_classes, prob='prob')
+    if dist.get_world_size() > 1:
+        graph, split_idx, num_classes = shared_graph.create_shared_graph(
+            graph, num_classes, prob='prob')
+    else:
+        split_idx = {}
+        train_mask = graph.ndata.pop('train_mask').bool()
+        split_idx['train_idx'] = graph.nodes()[train_mask]
+        del train_mask
+        test_mask = graph.ndata.pop('test_mask').bool()
+        split_idx['test_idx'] = graph.nodes()[test_mask]
+        del test_mask
+        val_mask = graph.ndata.pop('val_mask').bool()
+        split_idx['val_idx'] = graph.nodes()[val_mask]
+        del val_mask
 
     fan_out = [15, 15, 15]
     train(dist.get_rank(), dist.get_world_size(), graph, split_idx,

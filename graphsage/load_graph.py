@@ -52,20 +52,25 @@ def load_cora():
     return g, data.num_classes
 
 
-def load_papers400m_sparse(root="dataset"):
+def load_papers400m_sparse(root="dataset", load_true_features=True):
     if os.path.exists(os.path.join(root, 'papers400M_sparse.dgl')):
         print('load papers400M_sparse.dgl')
         graph = dgl.load_graphs(os.path.join(root,
                                              'papers400M_sparse.dgl'))[0][0]
         print('finish loading papers400M_sparse.dgl')
-        original_features = th.from_numpy(
-            np.load(os.path.join(root, 'papers400M_features.npy')))
+        if load_true_features:
+            original_features = th.from_numpy(
+                np.load(os.path.join(root, 'papers400M_features.npy')))
+        else:
+            original_features = th.rand([111059956, 128]).float()
+
         graph.ndata['features'] = th.cat([
             original_features, original_features, original_features,
             original_features
         ],
                                          dim=0)
         del original_features
+        print('finish constructing papers400M_sparse features')
         return graph, 172
     else:
         from ogb import nodeproppred
@@ -119,10 +124,13 @@ def load_papers400m_sparse(root="dataset"):
         ],
                      dim=0)
         print(src.shape, dst.shape)
-        graph = dgl.graph((src, dst))
+        graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst, sm, dm
-        print("Generating formats")
-        graph = graph.formats("csc")
+        print("Generating csc formats")
+        indptr = graph_coo.adj_sparse('csc')[0]
+        indices = graph_coo.adj_sparse('csc')[1]
+        graph = dgl.graph(('csc', (indptr, indices, [])))
+        del graph_coo
         np.save(os.path.join(root, 'papers400M_features.npy'),
                 original_features)
         graph.ndata['labels'] = th.cat([
@@ -167,18 +175,22 @@ def load_papers400m_sparse(root="dataset"):
     return graph, num_labels
 
 
-def load_papers400m(root="dataset"):
+def load_papers400m(root="dataset", load_true_features=True):
     if os.path.exists(os.path.join(root, 'papers400M.dgl')):
         print('load papers400M.dgl')
         graph = dgl.load_graphs(os.path.join(root, 'papers400M.dgl'))[0][0]
         print('finish loading papers400M.dgl')
-        original_features = th.from_numpy(
-            np.load(os.path.join(root, 'papers400M_features.npy')))
+        if load_true_features:
+            original_features = th.from_numpy(
+                np.load(os.path.join(root, 'papers400M_features.npy')))
+        else:
+            original_features = th.rand([111059956, 128]).float()
         graph.ndata['features'] = th.cat([
             original_features, original_features, original_features,
             original_features
         ],
                                          dim=0)
+        print('finish constructing papers400M features')
         del original_features
         return graph, 172
     else:
@@ -228,10 +240,13 @@ def load_papers400m(root="dataset"):
             original_dst + 3 * n_nodes, intra_dst
         ])
         print(src.shape, dst.shape)
-        graph = dgl.graph((src, dst))
+        graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst
-        print("Generating formats")
-        graph = graph.formats("csc")
+        print("Generating csc formats")
+        indptr = graph_coo.adj_sparse('csc')[0]
+        indices = graph_coo.adj_sparse('csc')[1]
+        graph = dgl.graph(('csc', (indptr, indices, [])))
+        del graph_coo
         np.save(os.path.join(root, 'papers400M_features.npy'),
                 original_features)
         graph.ndata['labels'] = th.cat([
