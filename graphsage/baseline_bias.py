@@ -15,6 +15,7 @@ import time
 import tqdm
 import numpy as np
 import load_graph
+import shared_graph
 
 
 # This function has been removed in dgl 0.9
@@ -95,9 +96,8 @@ class SAGE(nn.Module):
         return y
 
 
-def train(rank, world_size, graph, num_classes, batch_size, fan_out,
+def train(rank, world_size, graph, split_idx, num_classes, batch_size, fan_out,
           print_train, dataset):
-    torch.cuda.set_device(rank)
     hidden_dim = 256
 
     model = SAGE(graph.ndata['features'].shape[1], hidden_dim,
@@ -107,7 +107,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                                                 output_device=rank)
     opt = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 
-    train_idx = graph.nodes()[graph.ndata["train_mask"].bool()].to('cuda')
+    train_idx = split_idx['train_idx'].to('cuda')
 
     sampler = dgl.dataloading.NeighborSampler(fan_out,
                                               prob='prob',
@@ -182,23 +182,30 @@ if __name__ == '__main__':
                         help="Whether to print loss and acc during training.")
     args = parser.parse_args()
 
-    if args.dataset == "reddit":
-        graph, num_classes = load_graph.load_reddit()
-    elif args.dataset == "ogbn-products":
-        graph, num_classes = load_graph.load_ogb("ogbn-products",
-                                                 root=args.root)
-    elif args.dataset == "ogbn-papers100M":
-        graph, num_classes = load_graph.load_ogb("ogbn-papers100M",
-                                                 root=args.root)
-    elif args.dataset == "ogbn-papers400M":
-        graph, num_classes = load_graph.load_papers400m(root=args.root)
-
-    graph.edata['prob'] = torch.ones(graph.num_edges()).float()
-    graph.create_formats_()
-
     torch.set_num_threads(1)
     dist.init_process_group(backend='nccl', init_method="env://")
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank)
+
+    if rank == 0:
+        if args.dataset == "reddit":
+            graph, num_classes = load_graph.load_reddit()
+        elif args.dataset == "ogbn-products":
+            graph, num_classes = load_graph.load_ogb("ogbn-products",
+                                                     root=args.root)
+        elif args.dataset == "ogbn-papers100M":
+            graph, num_classes = load_graph.load_ogb("ogbn-papers100M",
+                                                     root=args.root)
+        elif args.dataset == "ogbn-papers400M":
+            graph, num_classes = load_graph.load_papers400m(root=args.root)
+    else:
+        graph = None
+        num_classes = None
+
+    graph, split_idx, num_classes = shared_graph.create_shared_graph(
+        graph, num_classes, prob='prob')
 
     fan_out = [15, 15, 15]
-    train(dist.get_rank(), dist.get_world_size(), graph, num_classes,
-          args.batch_size, fan_out, args.print_train, args.dataset)
+    train(dist.get_rank(), dist.get_world_size(), graph, split_idx,
+          num_classes, args.batch_size, fan_out, args.print_train,
+          args.dataset)
