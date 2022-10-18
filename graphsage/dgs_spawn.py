@@ -186,11 +186,13 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
+            torch.cuda.synchronize()
             sample_time_log.append(time.time() - iteration_start)
 
             load_start = time.time()
             x = cacher.fetch_data(input_nodes)
             y = blocks[-1].dstdata['labels'].long()
+            torch.cuda.synchronize()
             load_time_log.append(time.time() - load_start)
 
             train_start = time.time()
@@ -199,6 +201,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             opt.zero_grad()
             loss.backward()
             opt.step()
+            torch.cuda.synchronize()
             train_time_log.append(time.time() - train_start)
 
             if it % 20 == 0 and rank == 0 and print_train:
@@ -294,7 +297,7 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [8, 4, 2, 1]
+    n_procs_set = [2, 1]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
         indptr_cache_set = [0, 1]

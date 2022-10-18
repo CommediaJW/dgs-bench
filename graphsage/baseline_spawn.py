@@ -156,11 +156,13 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
+            torch.cuda.synchronize()
             sample_time_log.append(time.time() - iteration_start)
 
             load_start = time.time()
             x = blocks[0].srcdata['features']
             y = blocks[-1].dstdata['labels'].long()
+            torch.cuda.synchronize()
             load_time_log.append(time.time() - load_start)
 
             train_start = time.time()
@@ -169,6 +171,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             opt.zero_grad()
             loss.backward()
             opt.step()
+            torch.cuda.synchronize()
             train_time_log.append(time.time() - train_start)
 
             if it % 20 == 0 and rank == 0 and print_train:
