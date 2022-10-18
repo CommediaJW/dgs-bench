@@ -139,20 +139,31 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     if rank == 0:
         print("start training")
 
-    time_log = []
+    iteration_time_log = []
+    sample_time_log = []
+    load_time_log = []
+    train_time_log = []
     for _ in range(3):
         model.train()
 
-        start = time.time()
+        iteration_start = time.time()
+
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
+            sample_time_log.append(time.time() - iteration_start)
+
+            load_start = time.time()
             x = blocks[0].srcdata['features']
             y = blocks[-1].dstdata['labels'].long()
+            load_time_log.append(time.time() - load_start)
+
+            train_start = time.time()
             y_hat = model(blocks, x)
             loss = F.cross_entropy(y_hat, y)
             opt.zero_grad()
             loss.backward()
             opt.step()
+            train_time_log.append(time.time() - train_start)
 
             if it % 20 == 0 and rank == 0 and print_train:
                 acc = MF.accuracy(y_hat, y)
@@ -161,12 +172,14 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                       'MB')
 
             torch.cuda.synchronize()
-            end = time.time()
-            time_log.append(end - start)
+            iteration_time_log.append(time.time() - iteration_start)
 
-            start = time.time()
+            iteration_start = time.time()
 
-    avg_iteration_time = np.mean(time_log[1:])
+    avg_iteration_time = np.mean(iteration_time_log[1:])
+    avg_sample_time = np.mean(sample_time_log[1:]) * 1000
+    avg_load_time = np.mean(load_time_log[1:]) * 1000
+    avg_train_time = np.mean(train_time_log[1:]) * 1000
     throughput = batch_size * world_size / avg_iteration_time
 
     if rank == 0:
@@ -175,9 +188,13 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
         else:
             bias_info = 'Sample without bias'
         print(
-            "Model GraphSAGE | {} | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {} | Time per iteration {:.2f} ms | Throughput {:.2f}"
+            "Model GraphSAGE | {} | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
             .format(bias_info, hidden_dim, dataset, fan_out, batch_size,
-                    world_size, avg_iteration_time * 1000, throughput))
+                    world_size))
+        print(
+            "Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
+            .format(avg_iteration_time * 1000, avg_sample_time, avg_load_time,
+                    avg_train_time, throughput))
 
 
 if __name__ == '__main__':
