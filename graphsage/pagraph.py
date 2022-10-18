@@ -71,6 +71,9 @@ class GraphCacheServer:
             if "_P" in dgl_g.ndata and True:
                 sort_nid = torch.argsort(dgl_g.ndata["_P"], descending=True)
                 # dgl_g.ndata.pop("_P")
+            elif "out_degrees" in dgl_g.ndata and True:
+                sort_nid = torch.argsort(dgl_g.ndata["out_degrees"],
+                                         descending=True)
             else:
                 out_degrees = dgl_g.out_degrees()
                 sort_nid = torch.argsort(out_degrees, descending=True)

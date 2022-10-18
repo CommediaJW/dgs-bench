@@ -126,10 +126,12 @@ def load_papers400m_sparse(root="dataset", load_true_features=True):
         print(src.shape, dst.shape)
         graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst, sm, dm
+        out_degrees = graph.out_degrees()
         print("Generating csc formats")
         indptr = graph_coo.adj_sparse('csc')[0]
         indices = graph_coo.adj_sparse('csc')[1]
         graph = dgl.graph(('csc', (indptr, indices, [])))
+        graph.ndata['out_degrees'] = out_degrees
         del graph_coo
         np.save(os.path.join(root, 'papers400M_features.npy'),
                 original_features)
@@ -242,10 +244,12 @@ def load_papers400m(root="dataset", load_true_features=True):
         print(src.shape, dst.shape)
         graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst
+        out_degrees = graph.out_degrees()
         print("Generating csc formats")
         indptr = graph_coo.adj_sparse('csc')[0]
         indices = graph_coo.adj_sparse('csc')[1]
         graph = dgl.graph(('csc', (indptr, indices, [])))
+        graph.ndata['out_degrees'] = out_degrees
         del graph_coo
         np.save(os.path.join(root, 'papers400M_features.npy'),
                 original_features)
@@ -303,6 +307,9 @@ def load_ogb(name, root="dataset"):
 
     graph.ndata['features'] = graph.ndata.pop('feat')
     graph.ndata['labels'] = labels
+
+    graph.ndata['out_degrees'] = graph.out_degrees()
+
     num_labels = len(th.unique(labels[th.logical_not(th.isnan(labels))]))
 
     # Find the node IDs in the training, validation, and test set.

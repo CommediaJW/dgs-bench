@@ -103,8 +103,9 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                             world_size=world_size,
                             rank=rank)
 
+    if rank == 0:
+        print("create model")
     hidden_dim = 256
-
     model = SAGE(graph.ndata['features'].shape[1], hidden_dim,
                  num_classes).cuda()
     model = nn.parallel.DistributedDataParallel(model,
@@ -114,17 +115,22 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     train_idx = graph.nodes()[graph.ndata['train_mask'].bool()].to('cuda')
 
+    if rank == 0:
+        print("create sampler")
     if bias:
-        sampler = dgl.dataloading.NeighborSampler(
-            fan_out,
-            prefetch_node_feats=['features'],
-            prefetch_labels=['labels'])
-    else:
         sampler = dgl.dataloading.NeighborSampler(
             fan_out,
             prob='prob',
             prefetch_node_feats=['features'],
             prefetch_labels=['labels'])
+    else:
+        sampler = dgl.dataloading.NeighborSampler(
+            fan_out,
+            prefetch_node_feats=['features'],
+            prefetch_labels=['labels'])
+
+    if rank == 0:
+        print("create dataloader")
     train_dataloader = dgl.dataloading.DataLoader(graph,
                                                   train_idx,
                                                   sampler,
@@ -237,15 +243,18 @@ if __name__ == '__main__':
         graph, num_classes = load_graph.load_papers400m(
             root=args.root, load_true_features=False)
 
+    print("create csc formats")
     graph = graph.formats('csc')
+    graph.create_formats_()
     graph.edata.clear()
 
     if args.bias:
+        print("generate probs tensor")
         graph.edata['prob'] = torch.rand(graph.num_edges()).float()
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [1, 2, 4, 8]
+    n_procs_set = [8, 4, 2, 1]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
         mp.spawn(train,
