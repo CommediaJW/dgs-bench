@@ -215,10 +215,10 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
             iteration_start = time.time()
 
-    avg_iteration_time = np.mean(iteration_time_log[1:])
-    avg_sample_time = np.mean(sample_time_log[1:]) * 1000
-    avg_load_time = np.mean(load_time_log[1:]) * 1000
-    avg_train_time = np.mean(train_time_log[1:]) * 1000
+    avg_iteration_time = np.mean(iteration_time_log[10:])
+    avg_sample_time = np.mean(sample_time_log[10:]) * 1000
+    avg_load_time = np.mean(load_time_log[10:]) * 1000
+    avg_train_time = np.mean(train_time_log[10:]) * 1000
     throughput = batch_size * world_size / avg_iteration_time
 
     if rank == 0:
