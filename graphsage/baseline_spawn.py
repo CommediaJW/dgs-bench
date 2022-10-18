@@ -227,7 +227,6 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    # use all available GPUs
     n_procs = args.num_gpu
     import torch.multiprocessing as mp
     mp.spawn(train,
