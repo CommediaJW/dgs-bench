@@ -126,7 +126,7 @@ def load_papers400m_sparse(root="dataset", load_true_features=True):
         print(src.shape, dst.shape)
         graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst, sm, dm
-        out_degrees = graph.out_degrees()
+        out_degrees = graph_coo.out_degrees()
         print("Generating csc formats")
         indptr = graph_coo.adj_sparse('csc')[0]
         indices = graph_coo.adj_sparse('csc')[1]
@@ -244,7 +244,7 @@ def load_papers400m(root="dataset", load_true_features=True):
         print(src.shape, dst.shape)
         graph_coo = dgl.graph((src, dst))
         del src, dst, intra_src, intra_dst
-        out_degrees = graph.out_degrees()
+        out_degrees = graph_coo.out_degrees()
         print("Generating csc formats")
         indptr = graph_coo.adj_sparse('csc')[0]
         indices = graph_coo.adj_sparse('csc')[1]

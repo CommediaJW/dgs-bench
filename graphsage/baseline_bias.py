@@ -199,7 +199,7 @@ if __name__ == '__main__':
             graph, num_classes = load_graph.load_ogb("ogbn-papers100M",
                                                      root=args.root)
         elif args.dataset == "ogbn-papers400M":
-            graph, num_classes = load_graph.load_papers400m(
+            graph, num_classes = load_graph.load_papers400m_sparse(
                 root=args.root, load_true_features=False)
     else:
         graph = None
