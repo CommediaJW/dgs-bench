@@ -15,6 +15,19 @@ import time
 import tqdm
 import numpy as np
 import load_graph
+from chunk_tensor_sampler import ChunkTensorSampler
+
+
+def create_dgs_communicator(world_size, local_rank):
+    if local_rank == 0:
+        unique_id_array = torch.ops.dgs_ops._CAPI_get_unique_id()
+        broadcast_list = [unique_id_array]
+    else:
+        broadcast_list = [None]
+
+    dist.broadcast_object_list(broadcast_list, 0)
+    unique_ids = broadcast_list[0]
+    torch.ops.dgs_ops._CAPI_set_nccl(world_size, unique_ids, local_rank)
 
 
 # This function has been removed in dgl 0.9
@@ -96,12 +109,15 @@ class SAGE(nn.Module):
 
 
 def train(rank, world_size, graph, num_classes, batch_size, fan_out,
-          print_train, dataset, bias):
+          print_train, dataset, bias, libdgs, cache_percent_indices,
+          cache_percent_indptr, cache_percent_probs):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
+    torch.ops.load_library(libdgs)
+    create_dgs_communicator(world_size, rank)
 
     hidden_dim = 256
 
@@ -115,16 +131,26 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     train_idx = graph.nodes()[graph.ndata['train_mask'].bool()].to('cuda')
 
     if bias:
-        sampler = dgl.dataloading.NeighborSampler(
+        sampler = ChunkTensorSampler(
             fan_out,
+            graph,
+            prob="prob",
+            cache_percent_indices=cache_percent_indices,
+            cache_percent_indptr=cache_percent_indptr,
+            cache_percent_probs=cache_percent_probs,
+            comm_size=world_size,
             prefetch_node_feats=['features'],
             prefetch_labels=['labels'])
     else:
-        sampler = dgl.dataloading.NeighborSampler(
+        sampler = ChunkTensorSampler(
             fan_out,
-            prob='prob',
+            graph,
+            cache_percent_indices=cache_percent_indices,
+            cache_percent_indptr=cache_percent_indptr,
+            comm_size=world_size,
             prefetch_node_feats=['features'],
             prefetch_labels=['labels'])
+
     train_dataloader = dgl.dataloading.DataLoader(graph,
                                                   train_idx,
                                                   sampler,
@@ -171,13 +197,22 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     if rank == 0:
         if bias:
-            bias_info = 'Sample with bias'
+            print(
+                "Model GraphSAGE | Sample with bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
+                .format(hidden_dim, dataset, fan_out, batch_size, world_size))
+            print(
+                "Indptr cache size {:.1f} | Indices cache size {:.1f} | Probs cache size {:.1f} | Time per iteration {:.2f} ms | Throughput {:.2f}"
+                .format(cache_percent_indptr, cache_percent_indices,
+                        cache_percent_probs, avg_iteration_time * 1000,
+                        throughput))
         else:
-            bias_info = 'Sample without bias'
-        print(
-            "Model GraphSAGE | {} | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {} | Time per iteration {:.2f} ms | Throughput {:.2f}"
-            .format(bias_info, hidden_dim, dataset, fan_out, batch_size,
-                    world_size, avg_iteration_time * 1000, throughput))
+            print(
+                "Model GraphSAGE | Sample without bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
+                .format(hidden_dim, dataset, fan_out, batch_size, world_size))
+            print(
+                "Indptr cache size {:.1f} | Indices cache size {:.1f} | Time per iteration {:.2f} ms | Throughput {:.2f}"
+                .format(cache_percent_indptr, cache_percent_indices,
+                        avg_iteration_time * 1000, throughput))
 
 
 if __name__ == '__main__':
@@ -205,6 +240,9 @@ if __name__ == '__main__':
                         default=False,
                         help="Sample with bias.")
     parser.add_argument("--num-gpu", default="1", type=int)
+    parser.add_argument("--libdgs",
+                        default="../Dist-GPU-sampling/build/libdgs.so",
+                        help="Path of libdgs.so")
     args = parser.parse_args()
 
     torch.manual_seed(1)
@@ -231,7 +269,25 @@ if __name__ == '__main__':
 
     n_procs = args.num_gpu
     import torch.multiprocessing as mp
-    mp.spawn(train,
-             args=(n_procs, graph, num_classes, args.batch_size, fan_out,
-                   args.print_train, args.dataset, args.bias),
-             nprocs=n_procs)
+
+    indptr_cache_set = [0, 1]
+    indices_cache_set = [0, 1]
+
+    if args.bias:
+        prob_cache_set = [0, 1]
+        for indptr_cache, indices_cache, prob_cache in zip(
+                indptr_cache_set, indices_cache_set, prob_cache_set):
+            mp.spawn(train,
+                     args=(n_procs, graph, num_classes, args.batch_size,
+                           fan_out, args.print_train, args.dataset, args.bias,
+                           args.libdgs, indices_cache, indptr_cache,
+                           prob_cache),
+                     nprocs=n_procs)
+    else:
+        for indptr_cache, indices_cache in zip(indptr_cache_set,
+                                               indices_cache_set):
+            mp.spawn(train,
+                     args=(n_procs, graph, num_classes, args.batch_size,
+                           fan_out, args.print_train, args.dataset, args.bias,
+                           args.libdgs, indices_cache, indptr_cache, 0),
+                     nprocs=n_procs)
