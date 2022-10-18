@@ -221,7 +221,6 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help="Sample with bias.")
-    parser.add_argument("--num-gpu", default="1", type=int)
     args = parser.parse_args()
 
     torch.manual_seed(1)
@@ -246,9 +245,10 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs = args.num_gpu
+    n_procs_set = [1, 2, 4, 8]
     import torch.multiprocessing as mp
-    mp.spawn(train,
-             args=(n_procs, graph, num_classes, args.batch_size, fan_out,
-                   args.print_train, args.dataset, args.bias),
-             nprocs=n_procs)
+    for n_procs in n_procs_set:
+        mp.spawn(train,
+                 args=(n_procs, graph, num_classes, args.batch_size, fan_out,
+                       args.print_train, args.dataset, args.bias),
+                 nprocs=n_procs)

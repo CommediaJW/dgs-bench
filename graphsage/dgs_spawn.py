@@ -256,7 +256,6 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help="Sample with bias.")
-    parser.add_argument("--num-gpu", default="1", type=int)
     parser.add_argument("--libdgs",
                         default="../Dist-GPU-sampling/build/libdgs.so",
                         help="Path of libdgs.so")
@@ -284,27 +283,28 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs = args.num_gpu
+    n_procs_set = [1, 2, 4, 8]
     import torch.multiprocessing as mp
+    for n_procs in n_procs_set:
+        indptr_cache_set = [0, 1]
+        indices_cache_set = [0, 1]
 
-    indptr_cache_set = [0, 1]
-    indices_cache_set = [0, 1]
-
-    if args.bias:
-        prob_cache_set = [0, 1]
-        for indptr_cache, indices_cache, prob_cache in zip(
-                indptr_cache_set, indices_cache_set, prob_cache_set):
-            mp.spawn(train,
-                     args=(n_procs, graph, num_classes, args.batch_size,
-                           fan_out, args.print_train, args.dataset, args.bias,
-                           args.libdgs, indices_cache, indptr_cache,
-                           prob_cache),
-                     nprocs=n_procs)
-    else:
-        for indptr_cache, indices_cache in zip(indptr_cache_set,
-                                               indices_cache_set):
-            mp.spawn(train,
-                     args=(n_procs, graph, num_classes, args.batch_size,
-                           fan_out, args.print_train, args.dataset, args.bias,
-                           args.libdgs, indices_cache, indptr_cache, 0),
-                     nprocs=n_procs)
+        if args.bias:
+            prob_cache_set = [0, 1]
+            for indptr_cache, indices_cache, prob_cache in zip(
+                    indptr_cache_set, indices_cache_set, prob_cache_set):
+                mp.spawn(train,
+                         args=(n_procs, graph, num_classes, args.batch_size,
+                               fan_out, args.print_train, args.dataset,
+                               args.bias, args.libdgs, indices_cache,
+                               indptr_cache, prob_cache),
+                         nprocs=n_procs)
+        else:
+            for indptr_cache, indices_cache in zip(indptr_cache_set,
+                                                   indices_cache_set):
+                mp.spawn(train,
+                         args=(n_procs, graph, num_classes, args.batch_size,
+                               fan_out, args.print_train, args.dataset,
+                               args.bias, args.libdgs, indices_cache,
+                               indptr_cache, 0),
+                         nprocs=n_procs)
