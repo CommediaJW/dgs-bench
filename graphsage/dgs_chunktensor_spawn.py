@@ -138,7 +138,6 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     if rank == 0:
         print("create sampler")
 
-    torch.cuda.reset_peak_memory_stats()
     if bias:
         sampler = ChunkTensorSampler(
             fan_out,
