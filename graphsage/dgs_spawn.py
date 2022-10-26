@@ -16,7 +16,7 @@ import tqdm
 import numpy as np
 import load_graph
 from chunk_tensor_sampler import ChunkTensorSampler
-import pagraph
+from pagraph import GraphCacheServer
 
 
 def create_dgs_communicator(world_size, local_rank):
@@ -110,8 +110,7 @@ class SAGE(nn.Module):
 
 
 def train(rank, world_size, graph, num_classes, batch_size, fan_out,
-          print_train, dataset, bias, libdgs, cache_percent_indices,
-          cache_percent_indptr, cache_percent_probs):
+          print_train, dataset, bias, libdgs):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
@@ -133,26 +132,27 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     train_idx = graph.nodes()[graph.ndata['train_mask'].bool()].to('cuda')
 
+    torch.cuda.reset_peak_memory_stats()
+    model_mem_used = torch.cuda.max_memory_reserved()
+
+    if rank == 0:
+        print("pagraph cache")
+    cacher = GraphCacheServer(feat, graph.num_nodes(), rank)
+    cacher.auto_cache(graph)
+
     if rank == 0:
         print("create sampler")
     if bias:
-        sampler = ChunkTensorSampler(
-            fan_out,
-            graph,
-            prob="prob",
-            cache_percent_indices=cache_percent_indices,
-            cache_percent_indptr=cache_percent_indptr,
-            cache_percent_probs=cache_percent_probs,
-            comm_size=world_size,
-            prefetch_labels=['labels'])
+        sampler = ChunkTensorSampler(fan_out,
+                                     graph,
+                                     model_mem_used=model_mem_used,
+                                     prob="prob",
+                                     prefetch_labels=['labels'])
     else:
-        sampler = ChunkTensorSampler(
-            fan_out,
-            graph,
-            cache_percent_indices=cache_percent_indices,
-            cache_percent_indptr=cache_percent_indptr,
-            comm_size=world_size,
-            prefetch_labels=['labels'])
+        sampler = ChunkTensorSampler(fan_out,
+                                     graph,
+                                     model_mem_used=model_mem_used,
+                                     prefetch_labels=['labels'])
 
     if rank == 0:
         print("create dataloader")
@@ -168,18 +168,13 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                                                   use_uva=True)
 
     if rank == 0:
-        print("pagraph cache")
-    cacher = pagraph.GraphCacheServer(feat, graph.num_nodes(), gpuid=rank)
-    cacher.auto_cache(graph, None, 1, train_idx)
-
-    if rank == 0:
         print("start training")
 
     iteration_time_log = []
     sample_time_log = []
     load_time_log = []
     train_time_log = []
-    for _ in range(3):
+    for _ in range(1):
         model.train()
 
         iteration_start = time.time()
@@ -213,6 +208,9 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             torch.cuda.synchronize()
             iteration_time_log.append(time.time() - iteration_start)
 
+            if it > 100:
+                break
+
             iteration_start = time.time()
 
     avg_iteration_time = np.mean(iteration_time_log[10:])
@@ -226,21 +224,14 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             print(
                 "Model GraphSAGE | Sample with bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
-            print(
-                "Indptr cache size {:.1f} | Indices cache size {:.1f} | Probs cache size {:.1f} | Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
-                .format(cache_percent_indptr, cache_percent_indices,
-                        cache_percent_probs, avg_iteration_time * 1000,
-                        avg_sample_time, avg_load_time, avg_train_time,
-                        throughput))
         else:
             print(
                 "Model GraphSAGE | Sample without bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
-            print(
-                "Indptr cache size {:.1f} | Indices cache size {:.1f} | Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
-                .format(cache_percent_indptr, cache_percent_indices,
-                        avg_iteration_time * 1000, avg_sample_time,
-                        avg_load_time, avg_train_time, throughput))
+        print(
+            "Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
+            .format(avg_iteration_time * 1000, avg_sample_time, avg_load_time,
+                    avg_train_time, throughput))
 
 
 if __name__ == '__main__':
@@ -290,6 +281,7 @@ if __name__ == '__main__':
     graph = graph.formats('csc')
     graph.create_formats_()
     graph.edata.clear()
+    print("finish load graph")
 
     if args.bias:
         print("generate probs tensor")
@@ -300,25 +292,7 @@ if __name__ == '__main__':
     n_procs_set = [2, 1]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
-        indptr_cache_set = [0, 1]
-        indices_cache_set = [0, 1]
-
-        if args.bias:
-            prob_cache_set = [0, 1]
-            for indptr_cache, indices_cache, prob_cache in zip(
-                    indptr_cache_set, indices_cache_set, prob_cache_set):
-                mp.spawn(train,
-                         args=(n_procs, graph, num_classes, args.batch_size,
-                               fan_out, args.print_train, args.dataset,
-                               args.bias, args.libdgs, indices_cache,
-                               indptr_cache, prob_cache),
-                         nprocs=n_procs)
-        else:
-            for indptr_cache, indices_cache in zip(indptr_cache_set,
-                                                   indices_cache_set):
-                mp.spawn(train,
-                         args=(n_procs, graph, num_classes, args.batch_size,
-                               fan_out, args.print_train, args.dataset,
-                               args.bias, args.libdgs, indices_cache,
-                               indptr_cache, 0),
-                         nprocs=n_procs)
+        mp.spawn(train,
+                 args=(n_procs, graph, num_classes, args.batch_size, fan_out,
+                       args.print_train, args.dataset, args.bias, args.libdgs),
+                 nprocs=n_procs)
