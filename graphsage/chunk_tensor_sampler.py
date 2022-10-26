@@ -4,8 +4,10 @@ import dgl
 import torch.distributed as dist
 
 
-def get_available_memory(device, model_mem_used):
-    available_mem = torch.cuda.mem_get_info(device)[0] - model_mem_used
+def get_available_memory(device, model_mem_used, num_node):
+    available_mem = torch.cuda.mem_get_info(
+        device)[1] - model_mem_used - torch.cuda.max_memory_allocated() - 0.3 * torch.cuda.max_memory_reserved() - 1024 * 1024 * 1024 - num_node
+    available_mem = max(available_mem, 16)
     available_mem = torch.tensor([available_mem]).long().cuda()
     dist.all_reduce(available_mem, dist.ReduceOp.MIN)
     return available_mem.cpu().numpy()[0]
@@ -27,6 +29,7 @@ class ChunkTensorSampler(BlockSampler):
                          prefetch_labels=prefetch_labels,
                          prefetch_edge_feats=prefetch_edge_feats,
                          output_device=output_device)
+        torch.cuda.reset_peak_memory_stats()
         self.fanouts = fanouts
         self.prob = prob
         self.replace = replace
@@ -38,10 +41,12 @@ class ChunkTensorSampler(BlockSampler):
         if self.prob:
             probs = g.edata[self.prob]
 
+        self.num_node = g.num_nodes()
+
         comm_size = dist.get_world_size()
 
         indptr_cached_size = min(indptr.numel() * indptr.element_size() // comm_size,
-                                 get_available_memory(self.device, self.model_mem_used))
+                                 get_available_memory(self.device, self.model_mem_used, self.num_node))
         self.chunk_indptr = torch.classes.dgs_classes.ChunkTensor(
             indptr, indptr_cached_size)
         if dist.get_rank() == 0:
@@ -52,7 +57,7 @@ class ChunkTensorSampler(BlockSampler):
             _need_mem = (indices.numel() * indices.element_size() +
                          probs.numel() * probs.element_size()) // comm_size
             _cached_mem = min(
-                _need_mem, get_available_memory(self.device, self.model_mem_used))
+                _need_mem, get_available_memory(self.device, self.model_mem_used, self.num_node))
 
             indices_cached_size = int(_cached_mem / (
                 indices.element_size() + probs.element_size()) * indices.element_size())
@@ -69,11 +74,11 @@ class ChunkTensorSampler(BlockSampler):
                 probs, probs_cached_size)
             if dist.get_rank() == 0:
                 print("Cache probs per GPU {} MB".format(
-                    indices_cached_size / 1024 / 1024))
+                    probs_cached_size / 1024 / 1024))
 
         else:
             indices_cached_size = min(indices.numel() *
-                                      indices.element_size() // comm_size, get_available_memory(self.device, self.model_mem_used))
+                                      indices.element_size() // comm_size, get_available_memory(self.device, self.model_mem_used, self.num_node))
             self.chunk_indices = torch.classes.dgs_classes.ChunkTensor(
                 indices, indices_cached_size)
             if dist.get_rank() == 0:
@@ -87,7 +92,7 @@ class ChunkTensorSampler(BlockSampler):
             del self.chunk_probs
 
     def get_available_mem(self):
-        return get_available_memory(self.device, self.model_mem_used)
+        return get_available_memory(self.device, self.model_mem_used, self.num_node)
 
     def sample_blocks(self, g, seed_nodes, exclude_eids=None):
         seeds = seed_nodes
