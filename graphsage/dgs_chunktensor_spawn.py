@@ -132,6 +132,8 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     train_idx = graph.nodes()[graph.ndata['train_mask'].bool()].to('cuda')
 
+    model_mem_used = torch.cuda.max_memory_reserved()
+
     if rank == 0:
         print("create sampler")
 
@@ -140,18 +142,14 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
         sampler = ChunkTensorSampler(
             fan_out,
             graph,
-            feat_mem_used=0,
-            model_mem_used=torch.cuda.max_memory_allocated(),
-            avaliable_mem=None,
+            model_mem_used=model_mem_used,
             prob="prob",
             prefetch_labels=['labels'])
     else:
         sampler = ChunkTensorSampler(
             fan_out,
             graph,
-            feat_mem_used=0,
-            model_mem_used=torch.cuda.max_memory_allocated(),
-            avaliable_mem=None,
+            model_mem_used=model_mem_used,
             prefetch_labels=['labels'])
 
     if rank == 0:
@@ -174,7 +172,8 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     feat_cached_size = min(feat.numel() * feat.element_size() // dist.get_world_size(),
                            avaliable_mem)
     chunk_feat = torch.classes.dgs_classes.ChunkTensor(feat, feat_cached_size)
-    print("Cache feat per GPU {} MB".format(feat_cached_size / 1024 / 1024))
+    if dist.get_rank() == 0:
+        print("Cache feat per GPU {} MB".format(feat_cached_size / 1024 / 1024))
 
     if rank == 0:
         print("start training")
@@ -183,7 +182,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     sample_time_log = []
     load_time_log = []
     train_time_log = []
-    for _ in range(3):
+    for _ in range(1):
         model.train()
 
         iteration_start = time.time()
@@ -216,6 +215,9 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
             torch.cuda.synchronize()
             iteration_time_log.append(time.time() - iteration_start)
+
+            if it > 100:
+                break
 
             iteration_start = time.time()
 
