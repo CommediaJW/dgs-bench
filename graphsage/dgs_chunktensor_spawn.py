@@ -16,7 +16,7 @@ import time
 import tqdm
 import numpy as np
 import load_graph
-from chunk_tensor_sampler import ChunkTensorSampler
+from chunk_tensor_sampler import ChunkTensorSampler, get_available_memory
 
 
 def create_dgs_communicator(world_size, local_rank):
@@ -110,7 +110,7 @@ class SAGE(nn.Module):
 
 
 def train(rank, world_size, graph, num_classes, batch_size, fan_out,
-          print_train, dataset, bias, libdgs):
+          print_train, dataset, bias, libdgs, feat_first):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
@@ -135,22 +135,59 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
     torch.cuda.reset_peak_memory_stats()
     model_mem_used = torch.cuda.max_memory_reserved()
 
-    if rank == 0:
-        print("create sampler")
+    if not feat_first:
+        if rank == 0:
+            print("create sampler")
+        if bias:
+            sampler = ChunkTensorSampler(fan_out,
+                                         graph,
+                                         model_mem_used=model_mem_used,
+                                         prob="prob",
+                                         prefetch_labels=['labels'])
+        else:
+            sampler = ChunkTensorSampler(fan_out,
+                                         graph,
+                                         model_mem_used=model_mem_used,
+                                         prefetch_labels=['labels'])
 
-    if bias:
-        sampler = ChunkTensorSampler(
-            fan_out,
-            graph,
-            model_mem_used=model_mem_used,
-            prob="prob",
-            prefetch_labels=['labels'])
+        if rank == 0:
+            print("chunk feat cache")
+        avaliable_mem = sampler.get_available_mem()
+        feat_cached_size = min(
+            feat.numel() * feat.element_size() // dist.get_world_size(),
+            avaliable_mem)
+        chunk_feat = torch.classes.dgs_classes.ChunkTensor(
+            feat, feat_cached_size)
+        if dist.get_rank() == 0:
+            print("Cache feat per GPU {} MB".format(feat_cached_size / 1024 /
+                                                    1024))
     else:
-        sampler = ChunkTensorSampler(
-            fan_out,
-            graph,
-            model_mem_used=model_mem_used,
-            prefetch_labels=['labels'])
+        if rank == 0:
+            print("chunk feat cache")
+        avaliable_mem = get_available_memory(torch.cuda.current_device(),
+                                             model_mem_used, graph.num_nodes())
+        feat_cached_size = min(
+            feat.numel() * feat.element_size() // dist.get_world_size(),
+            avaliable_mem)
+        chunk_feat = torch.classes.dgs_classes.ChunkTensor(
+            feat, feat_cached_size)
+        if dist.get_rank() == 0:
+            print("Cache feat per GPU {} MB".format(feat_cached_size / 1024 /
+                                                    1024))
+
+        if rank == 0:
+            print("create sampler")
+        if bias:
+            sampler = ChunkTensorSampler(fan_out,
+                                         graph,
+                                         model_mem_used=model_mem_used,
+                                         prob="prob",
+                                         prefetch_labels=['labels'])
+        else:
+            sampler = ChunkTensorSampler(fan_out,
+                                         graph,
+                                         model_mem_used=model_mem_used,
+                                         prefetch_labels=['labels'])
 
     if rank == 0:
         print("create dataloader")
@@ -164,17 +201,6 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                                                   num_workers=0,
                                                   use_ddp=True,
                                                   use_uva=True)
-
-    if rank == 0:
-        print("chunk feat cache")
-
-    avaliable_mem = sampler.get_available_mem()
-    feat_cached_size = min(feat.numel() * feat.element_size() // dist.get_world_size(),
-                           avaliable_mem)
-    chunk_feat = torch.classes.dgs_classes.ChunkTensor(feat, feat_cached_size)
-    if dist.get_rank() == 0:
-        print("Cache feat per GPU {} MB".format(
-            feat_cached_size / 1024 / 1024))
 
     if rank == 0:
         print("start training")
@@ -235,14 +261,16 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
             print(
                 "Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
-                .format(avg_iteration_time * 1000, avg_sample_time, avg_load_time, avg_train_time, throughput))
+                .format(avg_iteration_time * 1000, avg_sample_time,
+                        avg_load_time, avg_train_time, throughput))
         else:
             print(
                 "Model GraphSAGE | Sample without bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
             print(
                 "Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
-                .format(avg_iteration_time * 1000, avg_sample_time, avg_load_time, avg_train_time, throughput))
+                .format(avg_iteration_time * 1000, avg_sample_time,
+                        avg_load_time, avg_train_time, throughput))
 
 
 if __name__ == '__main__':
@@ -272,6 +300,10 @@ if __name__ == '__main__':
     parser.add_argument("--libdgs",
                         default="../Dist-GPU-sampling/build/libdgs.so",
                         help="Path of libdgs.so")
+    parser.add_argument('--feat-first',
+                        action='store_true',
+                        default=False,
+                        help="Chunk tensor cache features first.")
     args = parser.parse_args()
 
     torch.manual_seed(1)
@@ -307,12 +339,12 @@ if __name__ == '__main__':
         if args.bias:
             mp.spawn(train,
                      args=(n_procs, graph, num_classes, args.batch_size,
-                           fan_out, args.print_train, args.dataset,
-                           args.bias, args.libdgs),
+                           fan_out, args.print_train, args.dataset, args.bias,
+                           args.libdgs, args.feat_first),
                      nprocs=n_procs)
         else:
             mp.spawn(train,
                      args=(n_procs, graph, num_classes, args.batch_size,
-                           fan_out, args.print_train, args.dataset,
-                           args.bias, args.libdgs),
+                           fan_out, args.print_train, args.dataset, args.bias,
+                           args.libdgs, args.feat_first),
                      nprocs=n_procs)
