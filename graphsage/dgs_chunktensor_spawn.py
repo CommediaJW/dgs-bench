@@ -173,7 +173,8 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
                            avaliable_mem)
     chunk_feat = torch.classes.dgs_classes.ChunkTensor(feat, feat_cached_size)
     if dist.get_rank() == 0:
-        print("Cache feat per GPU {} MB".format(feat_cached_size / 1024 / 1024))
+        print("Cache feat per GPU {} MB".format(
+            feat_cached_size / 1024 / 1024))
 
     if rank == 0:
         print("start training")
@@ -299,7 +300,7 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [1]
+    n_procs_set = [2, 1]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
 
