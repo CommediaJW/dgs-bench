@@ -147,23 +147,20 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     iteration_time_log = []
     sample_time_log = []
-    load_time_log = []
     train_time_log = []
-    for _ in range(3):
+    for _ in range(1):
         model.train()
 
         iteration_start = time.time()
 
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
-            torch.cuda.synchronize()
-            sample_time_log.append(time.time() - iteration_start)
 
-            load_start = time.time()
             x = blocks[0].srcdata['features']
             y = blocks[-1].dstdata['labels'].long()
+
             torch.cuda.synchronize()
-            load_time_log.append(time.time() - load_start)
+            sample_time_log.append(time.time() - iteration_start)
 
             train_start = time.time()
             y_hat = model(blocks, x)
@@ -183,11 +180,13 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             torch.cuda.synchronize()
             iteration_time_log.append(time.time() - iteration_start)
 
+            if it > 100:
+                break
+
             iteration_start = time.time()
 
     avg_iteration_time = np.mean(iteration_time_log[10:])
     avg_sample_time = np.mean(sample_time_log[10:]) * 1000
-    avg_load_time = np.mean(load_time_log[10:]) * 1000
     avg_train_time = np.mean(train_time_log[10:]) * 1000
     throughput = batch_size * world_size / avg_iteration_time
 
@@ -201,9 +200,9 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
             .format(bias_info, hidden_dim, dataset, fan_out, batch_size,
                     world_size))
         print(
-            "Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
-            .format(avg_iteration_time * 1000, avg_sample_time, avg_load_time,
-                    avg_train_time, throughput))
+            "Iteration time {:.2f} ms | Sample + Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
+            .format(avg_iteration_time * 1000, avg_sample_time, avg_train_time,
+                    throughput))
 
 
 if __name__ == '__main__':
@@ -250,6 +249,7 @@ if __name__ == '__main__':
     graph = graph.formats('csc')
     graph.create_formats_()
     graph.edata.clear()
+    print("finish load graph")
 
     if args.bias:
         print("generate probs tensor")
@@ -257,7 +257,7 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [8, 4, 2, 1]
+    n_procs_set = [2, 1]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
         mp.spawn(train,
