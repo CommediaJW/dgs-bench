@@ -132,6 +132,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     train_idx = graph.nodes()[graph.ndata['train_mask'].bool()].to('cuda')
 
+    torch.cuda.reset_peak_memory_stats()
     model_mem_used = torch.cuda.max_memory_reserved()
 
     if rank == 0:
