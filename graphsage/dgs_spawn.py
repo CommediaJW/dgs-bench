@@ -110,7 +110,7 @@ class SAGE(nn.Module):
 
 
 def train(rank, world_size, graph, num_classes, batch_size, fan_out,
-          print_train, dataset, bias, libdgs):
+          print_train, dataset, bias, libdgs, presampling):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
@@ -137,8 +137,8 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     if rank == 0:
         print("pagraph cache")
-    cacher = GraphCacheServer(feat, graph.num_nodes(), rank)
-    cacher.auto_cache(graph)
+    cacher = GraphCacheServer(feat, graph.num_nodes(), rank, presampling=presampling)
+    cacher.auto_cache(graph, train_idx, fan_out)
 
     if rank == 0:
         print("create sampler")
@@ -261,6 +261,10 @@ if __name__ == '__main__':
     parser.add_argument("--libdgs",
                         default="../Dist-GPU-sampling/build/libdgs.so",
                         help="Path of libdgs.so")
+    parser.add_argument('--presampling',
+                        action='store_true',
+                        default=False,
+                        help="Presampling for pagraph.")                        
     args = parser.parse_args()
 
     torch.manual_seed(1)
@@ -294,5 +298,5 @@ if __name__ == '__main__':
     for n_procs in n_procs_set:
         mp.spawn(train,
                  args=(n_procs, graph, num_classes, args.batch_size, fan_out,
-                       args.print_train, args.dataset, args.bias, args.libdgs),
+                       args.print_train, args.dataset, args.bias, args.libdgs, args.presampling),
                  nprocs=n_procs)
