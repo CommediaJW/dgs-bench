@@ -111,7 +111,7 @@ class SAGE(nn.Module):
 
 def train(rank, world_size, graph, num_classes, batch_size, fan_out,
           print_train, dataset, bias, libdgs, cache_percent_indices,
-          cache_percent_indptr, cache_percent_probs):
+          cache_percent_indptr, cache_percent_probs, presampling):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
@@ -169,8 +169,8 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out,
 
     if rank == 0:
         print("pagraph cache")
-    cacher = pagraph.GraphCacheServer(feat, graph.num_nodes(), gpuid=rank)
-    cacher.auto_cache(graph, None, 1, train_idx)
+    cacher = pagraph.GraphCacheServer(feat, graph.num_nodes(), gpuid=rank, presampling=presampling)
+    cacher.auto_cache(graph, None, 1, train_idx, fan_out)
 
     if rank == 0:
         print("start training")
@@ -267,6 +267,10 @@ if __name__ == '__main__':
     parser.add_argument("--libdgs",
                         default="../Dist-GPU-sampling/build/libdgs.so",
                         help="Path of libdgs.so")
+    parser.add_argument('--presampling',
+                        action='store_true',
+                        default=False,
+                        help="Presampling for pagraph.")                        
     args = parser.parse_args()
 
     torch.manual_seed(1)
@@ -308,7 +312,7 @@ if __name__ == '__main__':
                          args=(n_procs, graph, num_classes, args.batch_size,
                                fan_out, args.print_train, args.dataset,
                                args.bias, args.libdgs, indices_cache,
-                               indptr_cache, prob_cache),
+                               indptr_cache, prob_cache, args.presampling),
                          nprocs=n_procs)
         else:
             for indptr_cache, indices_cache in zip(indptr_cache_set,
@@ -317,5 +321,5 @@ if __name__ == '__main__':
                          args=(n_procs, graph, num_classes, args.batch_size,
                                fan_out, args.print_train, args.dataset,
                                args.bias, args.libdgs, indices_cache,
-                               indptr_cache, 0),
+                               indptr_cache, 0, args.presampling),
                          nprocs=n_procs)

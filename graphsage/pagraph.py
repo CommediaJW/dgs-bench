@@ -1,4 +1,7 @@
 import torch
+import dgl
+import time
+from dgl import function as fn
 
 
 class GraphCacheServer:
@@ -7,7 +10,7 @@ class GraphCacheServer:
     Automatically fetch the feature tensor from CPU or GPU
     """
 
-    def __init__(self, nfeats, node_num, nid_map=None, gpuid=0):
+    def __init__(self, nfeats, node_num, nid_map=None, gpuid=0, presampling=False):
         """
         Paramters:
                 graph:   should be created from `dgl.contrib.graph_store`
@@ -26,6 +29,7 @@ class GraphCacheServer:
         self.gidtype = torch.int32
         self.cached_num = 0
         self.capability = node_num
+        self.presampling = presampling
 
         self.full_cached = False
         self.gpu_fix_cache = None
@@ -38,7 +42,7 @@ class GraphCacheServer:
         self.try_num = 0
         self.miss_num = 0
 
-    def auto_cache(self, dgl_g, embed_names, cache_rate, train_nid):
+    def auto_cache(self, dgl_g, embed_names, cache_rate, train_nid, fan_out):
         """
         Automatically cache the node features
         Params:
@@ -67,13 +71,25 @@ class GraphCacheServer:
             self.cache_fix_data(full_nids, self.nfeats, is_full=True)
         else:
             # choose top-cap out-degree nodes to cache
+            if self.presampling:
+                print("Start presampling for PaGraph")
+                tic = time.time()
+                reversed_g = dgl.reverse(dgl_g, copy_ndata=False)
+                probability = torch.zeros(reversed_g.num_nodes())
+                probability[train_nid] = 1           
+                reversed_g.ndata["_P"] = probability
+                for l in range(len(fan_out)):
+                    print("layer", l+1)
+                    reversed_g.ndata['_p'] = torch.minimum(
+                        reversed_g.ndata['_P'].mul(fan_out[len(fan_out)-l-1]).div(reversed_g.out_degrees().to(torch.float32)),
+                        torch.ones(reversed_g.num_nodes()))
+                    reversed_g.update_all(fn.copy_u("_p", "m"), fn.sum("m", "_tp"))
+                    reversed_g.ndata['_P'] = reversed_g.ndata['_P'].add(reversed_g.ndata['_tp']) 
+                reversed_g.ndata.pop("_p")      
+                sort_nid = torch.argsort(reversed_g.ndata["_P"], descending=True)
+                del reversed_g
+                print(f"Done in {time.time()-tic}s")
 
-            if "_P" in dgl_g.ndata and True:
-                sort_nid = torch.argsort(dgl_g.ndata["_P"], descending=True)
-                # dgl_g.ndata.pop("_P")
-            elif "out_degrees" in dgl_g.ndata and True:
-                sort_nid = torch.argsort(dgl_g.ndata["out_degrees"],
-                                         descending=True)
             else:
                 out_degrees = dgl_g.out_degrees()
                 sort_nid = torch.argsort(out_degrees, descending=True)
