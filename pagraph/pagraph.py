@@ -1,6 +1,5 @@
 import torch
 import torch.distributed as dist
-import numpy
 
 
 class GraphCacheServer:
@@ -14,7 +13,7 @@ class GraphCacheServer:
         self.full_cached = False
         self.gpu_cached_data = None
 
-    def get_cache_nid(self, graph, capability, shuffle=False):
+    def get_cache_nid(self, graph, capability):
         type_size = self.nfeats.element_size()
 
         if capability >= self.nfeats.numel() * type_size:
@@ -45,11 +44,6 @@ class GraphCacheServer:
                     "[Pagraph] GPU num = {}, total cache rate = {:.2f}".format(
                         dist.get_world_size(),
                         capability / (self.nfeats.numel() * type_size)))
-
-            if shuffle:
-                cache_nids = cache_nids.numpy()
-                numpy.random.shuffle(cache_nids)
-                cache_nids = torch.from_numpy(cache_nids)
 
             self.full_cached = False
             return cache_nids.cuda(self.gpuid)

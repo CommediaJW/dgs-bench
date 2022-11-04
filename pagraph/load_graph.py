@@ -328,6 +328,20 @@ def load_ogb(name, root="dataset"):
     return graph, num_labels
 
 
+def load_rand_generated():
+    coo_row = th.randint(0, 1000000, (10000000, ))
+    coo_col = th.randint(0, 1000000, (10000000, ))
+    graph = dgl.graph((coo_row, coo_col))
+    num_labels = 6
+
+    graph.ndata['labels'] = th.randint(0, num_labels, (graph.num_nodes(), ))
+    graph.ndata['features'] = th.rand((graph.num_nodes(), 128))
+    graph.ndata['out_degrees'] = graph.out_degrees()
+    graph.ndata['train_mask'] = th.ones(graph.num_nodes(), dtype=th.bool)
+
+    return graph, num_labels
+
+
 def inductive_split(g):
     """Split the graph into training graph, validation graph, and test graph by training
     and validation masks.  Suitable for inductive models."""

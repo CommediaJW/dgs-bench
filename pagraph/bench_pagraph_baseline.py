@@ -57,6 +57,9 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out, dataset,
     if rank == 0:
         print("pagraph cache")
     avaliable_mem = sampler.get_available_mem() - 1 * 1024 * 1024 * 1024
+    avaliable_mem = min(
+        avaliable_mem,
+        feat.numel() * feat.element_size() // dist.get_world_size())
     cacher = GraphCacheServer(feat, rank)
     cacher.cache_data(cacher.get_cache_nid(graph, avaliable_mem))
 
@@ -129,7 +132,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out, dataset,
                 "Model GraphSAGE | Sample without bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
 
-    torch.cuda.synchronize()
+    dist.barrier()
     print(
         "GPU {} | Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
         .format(dist.get_rank(), avg_iteration_time * 1000, avg_sample_time,
@@ -142,7 +145,7 @@ if __name__ == '__main__':
                         default="ogbn-papers100M",
                         choices=[
                             "reddit", "ogbn-products", "ogbn-papers100M",
-                            "ogbn-papers400M"
+                            "ogbn-papers400M", "generated"
                         ],
                         help="The dataset to be sampled.")
     parser.add_argument("--batch-size",
@@ -174,6 +177,8 @@ if __name__ == '__main__':
     elif args.dataset == "ogbn-papers400M":
         graph, num_classes = load_graph.load_papers400m_sparse(
             root=args.root, load_true_features=False)
+    elif args.dataset == "generated":
+        graph, num_classes = load_graph.load_rand_generated()
 
     print("create csc formats")
     graph = graph.formats('csc')
@@ -202,7 +207,7 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [2, 1]
+    n_procs_set = [2]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
         mp.spawn(train,

@@ -5,8 +5,8 @@ import torch.distributed as dist
 
 
 def get_available_memory(device, model_mem_used, num_node):
-    available_mem = torch.cuda.mem_get_info(
-        device)[1] - model_mem_used - torch.cuda.max_memory_allocated(
+    available_mem = torch.cuda.mem_get_info(device)[
+        1] - model_mem_used - torch.ops.dgs_ops._CAPI_get_current_allocated(
         ) - 0.3 * torch.cuda.max_memory_reserved(
         ) - 2 * 1024 * 1024 * 1024 - num_node
     available_mem = max(available_mem, 16)

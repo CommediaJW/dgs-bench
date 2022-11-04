@@ -15,8 +15,25 @@ from graphsage import SAGE
 from dgs_create_communicator import create_dgs_communicator
 
 
+def shuffle_cache_nids(nids, root_rank=0):
+    if dist.get_world_size == 1:
+        nids = nids.cpu().numpy()
+        np.random.shuffle(nids)
+        return torch.from_numpy(nids).cuda()
+    else:
+        if dist.get_rank() == root_rank:
+            nids = nids.cpu().numpy()
+            np.random.shuffle(nids)
+            broadcast_list = [torch.from_numpy(nids)]
+        else:
+            broadcast_list = [None]
+
+        dist.broadcast_object_list(broadcast_list, root_rank)
+        return broadcast_list[0].cuda()
+
+
 def train(rank, world_size, graph, num_classes, batch_size, fan_out, dataset,
-          bias, libdgs):
+          bias, libdgs, pagraph_shuffle):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
@@ -54,12 +71,18 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out, dataset,
                                      cache_rate=0,
                                      prefetch_labels=['labels'])
 
-    if rank == 0:
-        print("pagraph cache")
     avaliable_mem = sampler.get_available_mem() - 1 * 1024 * 1024 * 1024
     cacher = GraphCacheServer(feat, rank)
-    cacher.cache_data_chunk_tensor(
-        cacher.get_cache_nid(graph, avaliable_mem * dist.get_world_size()))
+    cache_nids = cacher.get_cache_nid(graph,
+                                      avaliable_mem * dist.get_world_size())
+    if pagraph_shuffle:
+        if rank == 0:
+            print("shuffle gpu nids")
+        cache_nids = shuffle_cache_nids(cache_nids)
+
+    if rank == 0:
+        print("pagraph cache with chunk tensor")
+    cacher.cache_data_chunk_tensor(cache_nids)
 
     if rank == 0:
         print("create dataloader")
@@ -130,7 +153,7 @@ def train(rank, world_size, graph, num_classes, batch_size, fan_out, dataset,
                 "Model GraphSAGE | Sample without bias | Hidden dim {} | Dataset {} | Fanout {} | Batch size {} | GPU num {}"
                 .format(hidden_dim, dataset, fan_out, batch_size, world_size))
 
-    torch.cuda.synchronize()
+    dist.barrier()
     print(
         "GPU {} | Iteration time {:.2f} ms | Sample time {:.2f} ms | Load time {:.2f} ms | Train time {:.2f} ms | Throughput {:.2f}"
         .format(dist.get_rank(), avg_iteration_time * 1000, avg_sample_time,
@@ -143,7 +166,7 @@ if __name__ == '__main__':
                         default="ogbn-papers100M",
                         choices=[
                             "reddit", "ogbn-products", "ogbn-papers100M",
-                            "ogbn-papers400M"
+                            "ogbn-papers400M", "generated"
                         ],
                         help="The dataset to be sampled.")
     parser.add_argument("--batch-size",
@@ -163,6 +186,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     torch.manual_seed(1)
+    np.random.seed(1)
 
     if args.dataset == "reddit":
         graph, num_classes = load_graph.load_reddit()
@@ -175,6 +199,8 @@ if __name__ == '__main__':
     elif args.dataset == "ogbn-papers400M":
         graph, num_classes = load_graph.load_papers400m_sparse(
             root=args.root, load_true_features=False)
+    elif args.dataset == "generated":
+        graph, num_classes = load_graph.load_rand_generated()
 
     print("create csc formats")
     graph = graph.formats('csc')
@@ -203,10 +229,12 @@ if __name__ == '__main__':
 
     fan_out = [15, 15, 15]
 
-    n_procs_set = [2, 1]
+    n_procs_set = [2]
     import torch.multiprocessing as mp
     for n_procs in n_procs_set:
-        mp.spawn(train,
-                 args=(n_procs, graph, num_classes, args.batch_size, fan_out,
-                       args.dataset, args.bias, args.libdgs),
-                 nprocs=n_procs)
+        for pagraph_shuffle in [True, False]:
+            mp.spawn(train,
+                     args=(n_procs, graph, num_classes, args.batch_size,
+                           fan_out, args.dataset, args.bias, args.libdgs,
+                           pagraph_shuffle),
+                     nprocs=n_procs)
