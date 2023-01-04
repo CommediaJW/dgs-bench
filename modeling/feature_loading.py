@@ -17,26 +17,6 @@ def get_available_memory(device, num_node):
     return available_mem.cpu().numpy()[0]
 
 
-def get_hit_rate(cached_nids, nids):
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-
-    nids = nids.cpu().numpy()
-
-    cached_num_nodes_per_gpu = cached_nids.shape[0] // world_size
-    local_cached_nids = cached_nids[cached_num_nodes_per_gpu *
-                                    rank:cached_num_nodes_per_gpu * (rank + 1)]
-
-    local_hit_num = numpy.intersect1d(nids, local_cached_nids).shape[0]
-    remote_hit_num = numpy.intersect1d(nids,
-                                       cached_nids).shape[0] - local_hit_num
-
-    total_num = nids.shape[0]
-    local_hit_rate = local_hit_num / total_num
-    remote_hit_rate = remote_hit_num / total_num
-    return local_hit_rate, remote_hit_rate
-
-
 def bench(rank, world_size, libdgs, features, num_nodes_per_iteration,
           host_cache_rate):
     torch.cuda.set_device(rank)
@@ -58,8 +38,6 @@ def bench(rank, world_size, libdgs, features, num_nodes_per_iteration,
         (features.shape[1] * features.element_size()))
     feature_cache_size_per_gpu = cached_num_nodes_per_gpu * features.shape[
         1] * features.element_size()
-    cache_rate_per_gpu = feature_cache_size_per_gpu / (features.numel() *
-                                                       features.element_size())
     chunk_features = torch.classes.dgs_classes.ChunkTensor(
         features, feature_cache_size_per_gpu)
 
@@ -67,11 +45,21 @@ def bench(rank, world_size, libdgs, features, num_nodes_per_iteration,
 
     time_log = []
     nids_len_log = []
+    local_len_log = []
+    remote_len_log = []
+    host_len_log = []
     for it in range(10):
         nids = torch.randint(
             0, graph_num_nodes,
             (num_nodes_per_iteration, )).unique().long().cuda()
+        local_nids, remote_nids, host_nids = chunk_features._CAPI_split_index(
+            nids)
         nids_len_log.append(nids.numel())
+        local_len_log.append(local_nids.numel())
+        remote_len_log.append(remote_nids.numel())
+        host_len_log.append(host_nids.numel())
+
+        del local_nids, remote_nids, host_nids
         torch.cuda.synchronize()
         start = time.time()
         _ = chunk_features._CAPI_index(nids)
@@ -79,9 +67,10 @@ def bench(rank, world_size, libdgs, features, num_nodes_per_iteration,
         time_log.append(time.time() - start)
 
     print(
-        "GPU {} | Nodes per iteration {:.1f} | Host cache rate {:.3f} | Local cache rate {:.3f} | Loading time {:.2f} ms"
+        "GPU {} | Nodes per iteration {:.1f} | Host cache rate {:.3f} | Local nids len {:.1f} | Remote nids len {:.1f} | Host nids len {:.1f} | Loading time {:.2f} ms"
         .format(rank, numpy.mean(nids_len_log[3:]), host_cache_rate,
-                cache_rate_per_gpu,
+                numpy.mean(local_len_log[3:]), numpy.mean(remote_len_log[3:]),
+                numpy.mean(host_len_log[3:]),
                 numpy.mean(time_log[3:]) * 1000))
 
 
