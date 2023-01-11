@@ -65,7 +65,6 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
 
     minimum_access_node_num_log = []
     sampling_time_log = []
-    avg_seeds_degree_log = []
     fact_seeds_num_log = []
     for _ in range(10):
         seeds = torch.randint(0, graph_node_num,
@@ -73,7 +72,6 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
         fact_seeds_num = 0
         minimum_access_node_num = 0
         sampling_time = 0
-        seeds_degree_log = []
         for fan_out in fan_outs:
             if probs is not None:
                 torch.cuda.synchronize()
@@ -96,32 +94,27 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
 
             fact_seeds_num += seeds.numel()
             minimum_access_node_num += coo_row.numel()
-            for seed in seeds:
-                seeds_degree_log.append(indptr[seed + 1] - indptr[seed])
 
             seeds = frontier
 
         fact_seeds_num_log.append(fact_seeds_num)
         minimum_access_node_num_log.append(minimum_access_node_num)
         sampling_time_log.append(sampling_time)
-        avg_seeds_degree_log.append(numpy.mean(seeds_degree_log))
 
     if probs is not None:
         print(
-            'GPU {} | #Seeds {:.2f} | Indptr host cache rate {:.3f} | Indices host cache rate {:.3f} | Probs host cache rate {:.3f} | #Sampled node {:.1f} | Seeds avg degree {:.2f} | Sampling time {:.3f} ms'
+            'GPU {} | #Seeds {:.2f} | Indptr host cache rate {:.3f} | Indices host cache rate {:.3f} | Probs host cache rate {:.3f} | #Sampled node {:.1f} | Sampling time {:.3f} ms'
             .format(rank, numpy.mean(fact_seeds_num_log[3:]),
                     indptr_fact_host_cache_rate, indices_fact_host_cache_rate,
                     probs_fact_host_cache_rate,
                     numpy.mean(minimum_access_node_num_log[3:]),
-                    numpy.mean(avg_seeds_degree_log[3:]),
                     numpy.mean(sampling_time_log[3:]) * 1000))
     else:
         print(
-            'GPU {} | #Seeds {:.2f} | Indptr host cache rate {:.3f} | Indices host cache rate {:.3f} | #Sampled node {:.1f} | Seeds avg degree {:.2f} | Sampling time {:.3f} ms'
+            'GPU {} | #Seeds {:.2f} | Indptr host cache rate {:.3f} | Indices host cache rate {:.3f} | #Sampled node {:.1f} | Sampling time {:.3f} ms'
             .format(rank, numpy.mean(fact_seeds_num_log[3:]),
                     indptr_fact_host_cache_rate, indices_fact_host_cache_rate,
                     numpy.mean(minimum_access_node_num_log[3:]),
-                    numpy.mean(avg_seeds_degree_log[3:]),
                     numpy.mean(sampling_time_log[3:]) * 1000))
 
 
@@ -154,8 +147,10 @@ if __name__ == '__main__':
     indptr = graph.adj_sparse("csc")[0].long()
     indices = graph.adj_sparse("csc")[1].long()
     if args.bias:
+        print('sampling with bias')
         probs = torch.rand(graph.num_edges()).float()
     else:
+        print('sampling without bias')
         probs = None
     del graph
 
@@ -167,10 +162,8 @@ if __name__ == '__main__':
 
     for world_size in [1]:
         print("#GPU = {}".format(world_size))
-        for seeds_num in [
-                1000, 2000, 5000, 10000, 15000, 20000, 50000, 100000, 225000
-        ]:
+        for seeds_num in [300000, 400000, 500000, 750000, 1000000]:
             mp.spawn(bench,
-                     args=(world_size, indptr, indices, probs, 0, 0, 1, [15],
+                     args=(world_size, indptr, indices, probs, 0, 0, 0, [15],
                            seeds_num),
                      nprocs=world_size)
