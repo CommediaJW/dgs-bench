@@ -45,7 +45,7 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
             indices.element_size() // world_size))
     chunk_indices = torch.classes.dgs_classes.ChunkTensor(
         indices, indices_cache_size_per_gpu)
-    if probs:
+    if probs is not None:
         avaliable_men = get_available_memory(rank, graph_node_num)
         probs_cache_size_per_gpu = int(
             min(avaliable_men, (1 - probs_host_cache_rate) * probs.numel() *
@@ -75,7 +75,7 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
         sampling_time = 0
         seeds_degree_log = []
         for fan_out in fan_outs:
-            if probs:
+            if probs is not None:
                 torch.cuda.synchronize()
                 start = time.time()
                 coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_probs_with_chunk_tensor(
@@ -106,7 +106,7 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
         sampling_time_log.append(sampling_time)
         avg_seeds_degree_log.append(numpy.mean(seeds_degree_log))
 
-    if probs:
+    if probs is not None:
         print(
             'GPU {} | #Seeds {:.2f} | Indptr host cache rate {:.3f} | Indices host cache rate {:.3f} | Probs host cache rate {:.3f} | #Sampled node {:.1f} | Seeds avg degree {:.2f} | Sampling time {:.3f} ms'
             .format(rank, numpy.mean(fact_seeds_num_log[3:]),
@@ -171,6 +171,6 @@ if __name__ == '__main__':
                 1000, 2000, 5000, 10000, 15000, 20000, 50000, 100000, 225000
         ]:
             mp.spawn(bench,
-                     args=(world_size, indptr, indices, probs, 0, 0, 0, [15],
+                     args=(world_size, indptr, indices, probs, 0, 0, 1, [15],
                            seeds_num),
                      nprocs=world_size)
