@@ -12,3 +12,8 @@ def create_dgs_communicator(world_size, local_rank):
     dist.broadcast_object_list(broadcast_list, 0)
     unique_ids = broadcast_list[0]
     torch.ops.dgs_ops._CAPI_set_nccl(world_size, unique_ids, local_rank)
+
+
+def create_dgs_communicator_single_gpu():
+    unique_id_array = torch.ops.dgs_ops._CAPI_get_unique_id()
+    torch.ops.dgs_ops._CAPI_set_nccl(1, unique_id_array, 0)
