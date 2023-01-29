@@ -4,54 +4,6 @@ import numpy as np
 import os
 
 
-def load_reddit():
-    from dgl.data import RedditDataset
-
-    data = RedditDataset(self_loop=True)
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_pubmed():
-    from dgl.data import PubmedGraphDataset
-
-    data = PubmedGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_citeseer():
-    from dgl.data import CiteseerGraphDataset
-
-    data = CiteseerGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_cora():
-    from dgl.data import CoraGraphDataset
-
-    data = CoraGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
 def load_papers400m_sparse(root="dataset", load_true_features=True):
     if os.path.exists(os.path.join(root, 'papers400M_sparse.dgl')):
         print('load papers400M_sparse.dgl')
