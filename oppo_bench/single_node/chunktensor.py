@@ -9,14 +9,18 @@ import time
 import numpy as np
 from load_graph import load_papers400m_sparse, load_ogb
 from models import SAGE, GAT
+import chunktensor_sampler
 
 
-def train(rank, world_size, graph, model, fan_out, batch_size, bias):
+def train(rank, world_size, graph, model, fan_out, batch_size, bias,
+          cache_rate, libdgs):
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
+    torch.ops.load_library(libdgs)
+    chunktensor_sampler.create_dgs_communicator(world_size, rank)
 
     model = model.cuda()
     model = nn.parallel.DistributedDataParallel(model,
@@ -28,18 +32,43 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
     # move ids to GPU
     train_idx = train_idx.to('cuda')
 
+    # cache features
+    torch.cuda.reset_peak_memory_stats()
+    model_mem_used = torch.cuda.max_memory_reserved()
+
+    features = graph.ndata.pop('features')
+    avaliable_mem = chunktensor_sampler.get_available_memory(
+        torch.cuda.current_device(), model_mem_used, graph.num_nodes())
+    features_total_size = features.numel() * features.element_size()
+    features_cached_size_per_gpu = int(
+        min(features_total_size * cache_rate // world_size, avaliable_mem))
+    chunk_features = torch.classes.dgs_classes.ChunkTensor(
+        features, features_cached_size_per_gpu)
+    if dist.get_rank() == 0:
+        print(
+            "Cache features per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
+            .format(
+                features_cached_size_per_gpu / 1024 / 1024 / 1024,
+                features_cached_size_per_gpu * world_size /
+                features_total_size))
+
+    # create chunktensor sampler, cache probs, indices, indptr
     if bias:
         # bias sampling
-        sampler = dgl.dataloading.NeighborSampler(
+        sampler = chunktensor_sampler.ChunkTensorSampler(
             fan_out,
-            prob='probs',
-            prefetch_node_feats=['features'],
+            graph,
+            cache_rate=cache_rate,
+            model_mem_used=model_mem_used,
+            prob="probs",
             prefetch_labels=['labels'])
     else:
         # uniform sampling
-        sampler = dgl.dataloading.NeighborSampler(
+        sampler = chunktensor_sampler.ChunkTensorSampler(
             fan_out,
-            prefetch_node_feats=['features'],
+            graph,
+            cache_rate=cache_rate,
+            model_mem_used=model_mem_used,
             prefetch_labels=['labels'])
 
     train_dataloader = dgl.dataloading.DataLoader(graph,
@@ -63,7 +92,7 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
         start = time.time()
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
-            x = blocks[0].srcdata['features']
+            x = chunk_features._CAPI_index(input_nodes)
             y = blocks[-1].dstdata['labels']
             y_hat = model(blocks, x)
             loss = F.cross_entropy(y_hat, y.long())
@@ -108,6 +137,16 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help="Sample with bias.")
+    parser.add_argument('--libdgs',
+                        default='../Dist-GPU-sampling/build/libdgs.so',
+                        help='Path of libdgs.so')
+    parser.add_argument(
+        '--cache-rate',
+        default='0.4',
+        type=float,
+        help=
+        'The gpu cache rate of features and graph structure tensors. If the gpu memory is not enough, cache priority: features > probs > indices > indptr'
+    )
     parser.add_argument(
         "--dataset",
         default="ogbn-papers400M",
@@ -144,5 +183,6 @@ if __name__ == '__main__':
 
     import torch.multiprocessing as mp
     mp.spawn(train,
-             args=(n_procs, graph, model, fan_out, args.batch_size, args.bias),
+             args=(n_procs, graph, model, fan_out, args.batch_size, args.bias,
+                   args.cache_rate, args.libdgs),
              nprocs=n_procs)
