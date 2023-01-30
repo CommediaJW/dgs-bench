@@ -101,21 +101,18 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--graph-name", type=str, help="graph name")
+    parser.add_argument("--graph_name", type=str, help="graph name")
     parser.add_argument("--id", type=int, help="the partition id")
-    parser.add_argument("--ip-config",
+    parser.add_argument("--ip_config",
                         type=str,
                         help="The file for IP configuration")
-    parser.add_argument("--num-gpu",
+    parser.add_argument("--num_gpu",
                         type=int,
                         default=1,
                         help="the number of GPU device.")
-    parser.add_argument("--part-config",
+    parser.add_argument("--part_config",
                         type=str,
                         help="The path to the partition config file")
-    parser.add_argument("--num-classes",
-                        type=int,
-                        help="the number of classes")
     parser.add_argument("--model",
                         default="graphsage",
                         choices=["graphsage", "gat"],
@@ -124,12 +121,14 @@ if __name__ == "__main__":
                         action="store_true",
                         default=False,
                         help="Sample with bias.")
-    parser.add_argument("--batch-size", type=int, default=1000)
-    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=1000)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--standalone",
                         action="store_true",
                         help="run in the standalone mode")
+    parser.add_argument("--local_rank",
+                        type=int,
+                        help="get rank of the process")
     args = parser.parse_args()
 
-    print(args)
     main(args)
