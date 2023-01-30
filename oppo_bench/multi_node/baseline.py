@@ -31,10 +31,11 @@ def run(args, device, data):
     model = DistSAGE(in_feats, 256, num_classes)
     model = model.to(device)
 
-    dev_id = g.rank() % args.num_gpus
-    model = th.nn.parallel.DistributedDataParallel(model,
-                                                   device_ids=[dev_id],
-                                                   output_device=dev_id)
+    if not args.standalone:
+        dev_id = g.rank() % args.num_gpu
+        model = th.nn.parallel.DistributedDataParallel(model,
+                                                       device_ids=[dev_id],
+                                                       output_device=dev_id)
 
     loss_fcn = nn.CrossEntropyLoss()
     loss_fcn = loss_fcn.to(device)
@@ -71,7 +72,8 @@ def run(args, device, data):
 
 def main(args):
     dgl.distributed.initialize(args.ip_config)
-    th.distributed.init_process_group(backend="gloo")
+    if not args.standalone:
+        th.distributed.init_process_group(backend="gloo")
     g = dgl.distributed.DistGraph(args.graph_name,
                                   part_config=args.part_config)
     print("Rank {}".format(g.rank()))
@@ -84,7 +86,7 @@ def main(args):
     print("Part {} | train nid num {} (local num {})".format(
         g.rank(), len(train_nid),
         len(np.intersect1d(train_nid.numpy(), local_nid))))
-    dev_id = g.rank() % args.num_gpus
+    dev_id = g.rank() % args.num_gpu
     device = th.device("cuda:" + str(dev_id))
     labels = g.ndata["labels"][np.arange(g.num_nodes())]
     num_classes = len(th.unique(labels[th.logical_not(th.isnan(labels))]))
@@ -124,6 +126,9 @@ if __name__ == "__main__":
                         help="Sample with bias.")
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--standalone",
+                        action="store_true",
+                        help="run in the standalone mode")
     args = parser.parse_args()
 
     print(args)

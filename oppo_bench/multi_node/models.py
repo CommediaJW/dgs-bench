@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import dgl
 import dgl.nn as dglnn
 import tqdm
+from contextlib import contextmanager
 
 
 class DistSAGE(nn.Module):
@@ -74,3 +75,8 @@ class DistSAGE(nn.Module):
             x = y
             g.barrier()
         return y
+
+    @contextmanager
+    def join(self):
+        """dummy join for standalone"""
+        yield
