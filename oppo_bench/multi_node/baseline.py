@@ -5,7 +5,7 @@ import torch as th
 import torch.nn as nn
 import torch.optim as optim
 import dgl
-from models import DistSAGE
+from models import DistSAGE, DistGAT
 
 
 def initializer(shape, dtype):
@@ -19,10 +19,11 @@ def run(args, device, data):
     train_nid, num_classes, in_feats, g = data
 
     # prefetch_node_feats/prefetch_labels are not supported for DistGraph yet
+    fan_out = [15, 15, 15]
     if args.bias:
-        sampler = dgl.dataloading.NeighborSampler([15, 15, 15], prob="probs")
+        sampler = dgl.dataloading.NeighborSampler(fan_out, prob="probs")
     else:
-        sampler = dgl.dataloading.NeighborSampler([15, 15, 15])
+        sampler = dgl.dataloading.NeighborSampler(fan_out)
     dataloader = dgl.dataloading.DistNodeDataLoader(
         g,
         train_nid,
@@ -31,7 +32,12 @@ def run(args, device, data):
         shuffle=True,
         drop_last=False,
     )
-    model = DistSAGE(in_feats, 256, num_classes)
+
+    if args.model == "graphsage":
+        model = DistSAGE(in_feats, 256, num_classes)
+    elif args.model == "gat":
+        heads = [8, 8, 8]
+        model = DistGAT(in_feats, 32, num_classes, heads)
     model = model.to(device)
 
     if not args.standalone:
@@ -68,9 +74,11 @@ def run(args, device, data):
                 start = time.time()
 
     avg_iteration_time = np.mean(iteration_time_log[5:])
-    print("Part {} | Iteration Time {:.4f} ms | Throughput {:.3f} seeds/sec".
-          format(g.rank(), avg_iteration_time * 1000,
-                 args.batch_size / avg_iteration_time))
+    print(
+        "Part {} | Model {} | Fan out {} | Sampling with bias {} | Iteration Time {:.4f} ms | Throughput {:.3f} seeds/sec"
+        .format(g.rank(), args.model, fan_out, args.bias,
+                avg_iteration_time * 1000,
+                args.batch_size / avg_iteration_time))
 
 
 def main(args):
@@ -80,7 +88,6 @@ def main(args):
     g = dgl.distributed.DistGraph(args.graph_name,
                                   part_config=args.part_config)
     print("Rank {}".format(g.rank()))
-
     pb = g.get_partition_book()
     train_nid = dgl.distributed.node_split(g.ndata["train_mask"],
                                            pb,

@@ -80,3 +80,46 @@ class DistSAGE(nn.Module):
     def join(self):
         """dummy join for standalone"""
         yield
+
+
+class DistGAT(nn.Module):
+
+    def __init__(self, in_size, hid_size, out_size, heads):
+        super().__init__()
+        self.gat_layers = nn.ModuleList()
+        # three-layer GAT
+        self.gat_layers.append(
+            dglnn.GATConv(in_size,
+                          hid_size,
+                          heads[0],
+                          activation=F.elu,
+                          allow_zero_in_degree=True))
+        self.gat_layers.append(
+            dglnn.GATConv(hid_size * heads[0],
+                          hid_size,
+                          heads[1],
+                          residual=True,
+                          activation=F.elu,
+                          allow_zero_in_degree=True))
+        self.gat_layers.append(
+            dglnn.GATConv(hid_size * heads[1],
+                          out_size,
+                          heads[2],
+                          residual=True,
+                          activation=None,
+                          allow_zero_in_degree=True))
+
+    def forward(self, blocks, x):
+        h = x
+        for l, (layer, block) in enumerate(zip(self.gat_layers, blocks)):
+            h = layer(block, h)
+            if l == len(self.gat_layers) - 1:  # last layer
+                h = h.mean(1)
+            else:  # other layer(s)
+                h = h.flatten(1)
+        return h
+
+    @contextmanager
+    def join(self):
+        """dummy join for standalone"""
+        yield
