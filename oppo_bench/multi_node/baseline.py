@@ -19,7 +19,10 @@ def run(args, device, data):
     train_nid, num_classes, in_feats, g = data
 
     # prefetch_node_feats/prefetch_labels are not supported for DistGraph yet
-    sampler = dgl.dataloading.NeighborSampler([15, 15, 15])
+    if args.bias:
+        sampler = dgl.dataloading.NeighborSampler([15, 15, 15], prob="probs")
+    else:
+        sampler = dgl.dataloading.NeighborSampler([15, 15, 15])
     dataloader = dgl.dataloading.DistNodeDataLoader(
         g,
         train_nid,

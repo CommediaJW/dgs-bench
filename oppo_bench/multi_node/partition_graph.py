@@ -41,6 +41,12 @@ if __name__ == "__main__":
                            type=str,
                            default="data",
                            help="Output path of partitioned graph.")
+    argparser.add_argument(
+        "--bias",
+        action="store_true",
+        help=
+        "For sampling with bias, generate probs tensor as edata before partition."
+    )
     args = argparser.parse_args()
 
     start = time.time()
@@ -59,6 +65,10 @@ if __name__ == "__main__":
         th.sum(g.ndata["val_mask"]),
         th.sum(g.ndata["test_mask"]),
     ))
+
+    if args.bias:
+        g.edata["probs"] = th.randn((g.num_edges(), )).float()
+
     if args.balance_train:
         balance_ntypes = g.ndata["train_mask"]
     else:
