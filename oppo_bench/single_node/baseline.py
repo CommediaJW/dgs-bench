@@ -4,20 +4,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import torch.distributed.optim
+import torchmetrics.functional as MF
 import dgl
 import time
 import numpy as np
-from load_graph import load_papers400m_sparse, load_ogb
 from models import SAGE, GAT
+from utils.load_graph import load_papers400m_sparse, load_ogb
 
 
-def train(rank, world_size, graph, model, fan_out, batch_size, bias):
+def run(rank, world_size, data, args):
+    graph, num_classes = data
+
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
 
+    if args.model == 'graphsage':
+        model = SAGE(graph.ndata['features'].shape[1], 256, num_classes)
+    elif args.model == 'gat':
+        heads = [8, 8, 8]
+        model = GAT(graph.ndata['features'].shape[1], 32, num_classes, heads)
     model = model.cuda()
     model = nn.parallel.DistributedDataParallel(model,
                                                 device_ids=[rank],
@@ -28,17 +36,17 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
     # move ids to GPU
     train_idx = train_idx.to('cuda')
 
-    if bias:
+    if args.bias:
         # bias sampling
         sampler = dgl.dataloading.NeighborSampler(
-            fan_out,
+            [int(fanout) for fanout in args.fan_out.split(',')],
             prob='probs',
             prefetch_node_feats=['features'],
             prefetch_labels=['labels'])
     else:
         # uniform sampling
         sampler = dgl.dataloading.NeighborSampler(
-            fan_out,
+            [int(fanout) for fanout in args.fan_out.split(',')],
             prefetch_node_feats=['features'],
             prefetch_labels=['labels'])
 
@@ -46,7 +54,7 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
                                                   train_idx,
                                                   sampler,
                                                   device='cuda',
-                                                  batch_size=batch_size,
+                                                  batch_size=args.batch_size,
                                                   shuffle=True,
                                                   drop_last=False,
                                                   num_workers=0,
@@ -56,7 +64,7 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
     if rank == 0:
         print('start training...')
     iteration_time_log = []
-    for _ in range(1):
+    for epoch in range(args.num_epochs):
         model.train()
 
         torch.cuda.synchronize()
@@ -75,13 +83,22 @@ def train(rank, world_size, graph, model, fan_out, batch_size, bias):
             end = time.time()
             iteration_time_log.append(end - start)
 
+            if it % 20 == 0 and rank == 0 and args.print_train:
+                acc = MF.accuracy(y_hat,
+                                  y,
+                                  task='multiclass',
+                                  num_classes=num_classes)
+                print('Epoch {} | Iteration {} | Loss {} | Acc {}'.format(
+                    epoch, it, loss.item(), acc.item()))
+
+            torch.cuda.synchronize()
             start = time.time()
 
     avg_iteration_time = np.mean(iteration_time_log[5:])
     all_gather_list = [None for _ in range(world_size)]
     dist.all_gather_object(all_gather_list, avg_iteration_time)
     avg_iteration_time = np.mean(all_gather_list)
-    throughput = batch_size * world_size / avg_iteration_time.item()
+    throughput = args.batch_size * world_size / avg_iteration_time.item()
     if rank == 0:
         print('Time per iteration {:.3f} ms | Throughput {:.3f} seeds/sec'.
               format(avg_iteration_time * 1000, throughput))
@@ -93,6 +110,7 @@ if __name__ == '__main__':
                         default='8',
                         type=int,
                         help='The number GPU participated in the training.')
+    parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument('--root',
                         default='dataset/',
                         help='Path of the dataset.')
@@ -104,6 +122,7 @@ if __name__ == '__main__':
                         default="1000",
                         type=int,
                         help="The number of seeds of sampling.")
+    parser.add_argument('--fan-out', type=str, default='15,15,15')
     parser.add_argument('--bias',
                         action='store_true',
                         default=False,
@@ -112,6 +131,10 @@ if __name__ == '__main__':
         "--dataset",
         default="ogbn-papers400M",
         choices=["ogbn-products", "ogbn-papers100M", "ogbn-papers400M"])
+    parser.add_argument('--print-train',
+                        action='store_true',
+                        default=False,
+                        help="Whether to print loss and acc during training.")
     args = parser.parse_args()
 
     if args.dataset == "ogbn-products":
@@ -127,22 +150,16 @@ if __name__ == '__main__':
 
     n_procs = min(args.num_gpu, torch.cuda.device_count())
 
-    fan_out = [15, 15, 15]
-    if args.model == 'graphsage':
-        model = SAGE(graph.ndata['features'].shape[1], 256, num_classes)
-    elif args.model == 'gat':
-        heads = [8, 8, 8]
-        model = GAT(graph.ndata['features'].shape[1], 32, num_classes, heads)
-
     if args.bias:
         graph.edata['probs'] = torch.randn((graph.num_edges(), )).float()
 
     print(
         'Dataset {} | GPU num {} | Model {} | Fan out {} | Batch size {} | Bias sampling {}'
-        .format(args.dataset, n_procs, args.model, fan_out, args.batch_size,
-                args.bias))
+        .format(args.dataset, n_procs, args.model,
+                [int(fanout) for fanout in args.fan_out.split(',')],
+                args.batch_size, args.bias))
+
+    data = graph, num_classes
 
     import torch.multiprocessing as mp
-    mp.spawn(train,
-             args=(n_procs, graph, model, fan_out, args.batch_size, args.bias),
-             nprocs=n_procs)
+    mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)
