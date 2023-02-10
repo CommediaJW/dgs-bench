@@ -277,7 +277,6 @@ class Compresser(object):
             device = self.device
         else:
             self.device = device
-
         if self.quantized:
             if self.mode == "vq":
                 return self.vq_decompresser(compressed_features, device)
@@ -292,21 +291,26 @@ class Compresser(object):
         # vector dequantization
         compressed_features = compressed_features.to(device).to(th.int64)
         self.codebooks = self.codebooks.to(device)
-        num_parts = self.codebooks.shape[0]
-        width = self.width
-        decompressed = th.empty((compressed_features.shape[0], self.feat_dim),
-                                dtype=th.float32,
-                                device=device)
-        # dequantize by index selecting
-        for i in range(num_parts - 1):
-            h = i * width
-            t = (i + 1) * width
-            decompressed[:, h:t] = th.index_select(
-                self.codebooks[i], 0, compressed_features[:, i].flatten())
-        decompressed[:, (num_parts - 1) * width:] = th.index_select(
-            self.codebooks[num_parts - 1, :, :self.feat_dim -
-                           (num_parts - 1) * width], 0,
-            compressed_features[:, num_parts - 1].flatten())
+        if device == 'cuda':
+            decompressed = th.ops.bifeat_ops._CAPI_vq_decompress(
+                compressed_features, self.codebooks, self.feat_dim)
+        else:
+            num_parts = self.codebooks.shape[0]
+            width = self.width
+            decompressed = th.empty(
+                (compressed_features.shape[0], self.feat_dim),
+                dtype=th.float32,
+                device=device)
+            # dequantize by index selecting
+            for i in range(num_parts - 1):
+                h = i * width
+                t = (i + 1) * width
+                decompressed[:, h:t] = th.index_select(
+                    self.codebooks[i], 0, compressed_features[:, i].flatten())
+            decompressed[:, (num_parts - 1) * width:] = th.index_select(
+                self.codebooks[num_parts - 1, :, :self.feat_dim -
+                               (num_parts - 1) * width], 0,
+                compressed_features[:, num_parts - 1].flatten())
         return decompressed
 
     def sq_decompresser(self, compressed_features, device):
@@ -322,7 +326,8 @@ class Compresser(object):
             exp = unpackbits(exp,
                              mask=2 * drange - 1,
                              shape=[exp.shape[0], self.feat_dim],
-                             dtype=th.uint8)
+                             dtype=th.uint8,
+                             device=device)
         if self.length > 1:
             if self.length < 8:
                 # unsigned to signed

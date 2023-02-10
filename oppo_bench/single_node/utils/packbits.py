@@ -10,7 +10,6 @@ def tensor_dim_slice(tensor, dim, s):
 def packshape(shape, dim, mask, dtype):
     nbits_element = torch.iinfo(dtype).bits
     nbits = 1 if mask == 0b00000001 else 2 if mask == 0b00000011 else 4 if mask == 0b00001111 else 8 if mask == 0b11111111 else None
-    # print(nbits, nbits_element)
     assert nbits is not None and nbits <= nbits_element and nbits_element % nbits == 0
     packed_size = nbits_element // nbits
     shape = list(shape)
@@ -18,11 +17,17 @@ def packshape(shape, dim, mask, dtype):
     return shape, packed_size, nbits
 
 
-def packbits(tensor, dim=-1, mask=0b00000001, out=None, dtype=torch.uint8):
+def packbits(tensor,
+             dim=-1,
+             mask=0b00000001,
+             out=None,
+             dtype=torch.uint8,
+             device="cpu"):
     shape, packed_size, nbits = packshape(tensor.shape,
                                           dim=dim,
                                           mask=mask,
                                           dtype=dtype)
+    tensor = tensor.to(device)
     out = out.zero_() if out is not None else torch.zeros(
         shape, device=tensor.device, dtype=dtype)
     assert tuple(out.shape) == tuple(shape)
@@ -32,9 +37,7 @@ def packbits(tensor, dim=-1, mask=0b00000001, out=None, dtype=torch.uint8):
         sliced_input = tensor_dim_slice(tensor, dim,
                                         slice(idx, idx + width, 1))
         idx += width
-        # print(sliced_input)
         compress = (sliced_input << (nbits * (packed_size - e - 1)))
-        # print(compress)
         sliced_output = out.narrow(dim, 0, sliced_input.shape[dim])
         sliced_output |= compress
     return out
@@ -44,17 +47,20 @@ def unpackbits(tensor,
                shape,
                dim=-1,
                mask=0b00000001,
-               out=None,
-               dtype=torch.uint8):
+               dtype=torch.uint8,
+               device="cpu"):
     _, packed_size, nbits = packshape(shape,
                                       dim=dim,
                                       mask=mask,
                                       dtype=tensor.dtype)
-    ts = []
-    for e in range(packed_size):
-        ts.append(
-            ((tensor >>
-              (nbits *
-               (packed_size - e - 1))).bitwise_and_((1 << nbits) - 1)).narrow(
-                   dim, 0, (shape[dim] - e - 1) // packed_size + 1))
-    return torch.cat(ts, -1)
+    tensor = tensor.to(device)
+    if device == "cuda":
+        return torch.ops.bifeat_ops._CAPI_unpack_bits(tensor, shape[1],
+                                                      packed_size, nbits)
+    else:
+        ts = []
+        for e in range(packed_size):
+            ts.append(((tensor >> (nbits * (packed_size - e - 1))
+                        ).bitwise_and_((1 << nbits) - 1)).narrow(
+                            dim, 0, (shape[dim] - e - 1) // packed_size + 1))
+        return torch.cat(ts, -1)

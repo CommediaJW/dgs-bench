@@ -23,6 +23,7 @@ def run(rank, world_size, data, args, compresser):
                             world_size=world_size,
                             rank=rank)
     torch.ops.load_library(args.libdgs)
+    torch.ops.load_library(args.libbifeat)
     create_dgs_communicator(world_size, rank)
 
     if args.model == 'graphsage':
@@ -108,7 +109,7 @@ def run(rank, world_size, data, args, compresser):
                  blocks) in enumerate(train_dataloader):
             if args.compress_feat:
                 x = blocks[0].srcdata['features']
-                x = compresser.decompress(x, rank)
+                x = compresser.decompress(x, "cuda")
             else:
                 x = chunk_features._CAPI_index(input_nodes)
             y = blocks[-1].dstdata['labels']
@@ -178,6 +179,10 @@ if __name__ == '__main__':
                         default='../Dist-GPU-sampling/build/libdgs.so',
                         help='Path of libdgs.so')
     parser.add_argument(
+        '--libbifeat',
+        default='../GPU-Feature-Quantization/build/libbifeat.so',
+        help='Path of libbifeat.so')
+    parser.add_argument(
         '--feat-cache-rate',
         default='0.4',
         type=float,
@@ -203,7 +208,11 @@ if __name__ == '__main__':
                         default='sq',
                         choices=['vq', 'sq'])
     parser.add_argument('--compress-width', type=int, default=1)
-    parser.add_argument('--compress-length', type=int, default=1)
+    parser.add_argument('--compress-length', type=int, default=4)
+    parser.add_argument("--compress-feat-save-root",
+                        type=str,
+                        default=None,
+                        help="The directory to save the compressed features.")
     args = parser.parse_args()
 
     if args.dataset == "ogbn-products":
@@ -230,7 +239,9 @@ if __name__ == '__main__':
         compresser = Compresser(args.compress_mode, args.compress_length,
                                 args.compress_width)
         graph.ndata["features"] = compresser.compress(
-            graph.ndata.pop("features"), args.dataset)
+            graph.ndata.pop("features"),
+            cache_root=args.compress_feat_save_root,
+            dataset_name=args.dataset)
     else:
         compresser = None
 
