@@ -23,7 +23,8 @@ def run(rank, world_size, data, args, compresser):
                             world_size=world_size,
                             rank=rank)
     torch.ops.load_library(args.libdgs)
-    torch.ops.load_library(args.libbifeat)
+    if args.compress_feat:
+        torch.ops.load_library(args.libbifeat)
     create_dgs_communicator(world_size, rank)
 
     if args.model == 'graphsage':
@@ -184,14 +185,14 @@ if __name__ == '__main__':
         help='Path of libbifeat.so')
     parser.add_argument(
         '--feat-cache-rate',
-        default='0.4',
+        default='1',
         type=float,
         help=
         'The gpu cache rate of features. If the gpu memory is not enough, cache priority: features > probs > indices > indptr'
     )
     parser.add_argument(
         '--graph-cache-rate',
-        default='0.4',
+        default='1',
         type=float,
         help=
         'The gpu cache rate of graph structure tensors. If the gpu memory is not enough, cache priority: features > probs > indices > indptr'
