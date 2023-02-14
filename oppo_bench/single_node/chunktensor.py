@@ -237,8 +237,6 @@ if __name__ == '__main__':
 
     n_procs = min(args.num_gpu, torch.cuda.device_count())
 
-    fan_out = [15, 15, 15]
-
     if args.bias:
         graph.edata['probs'] = torch.randn((graph.num_edges(), )).float()
 
