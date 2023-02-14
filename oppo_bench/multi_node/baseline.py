@@ -8,18 +8,12 @@ import dgl
 from models import DistSAGE, DistGAT
 
 
-def initializer(shape, dtype):
-    arr = th.zeros(shape, dtype=dtype)
-    arr.uniform_(-1, 1)
-    return arr
-
-
 def run(args, device, data):
     # Unpack data
     train_nid, num_classes, in_feats, g = data
 
     # prefetch_node_feats/prefetch_labels are not supported for DistGraph yet
-    fan_out = [15, 15, 15]
+    fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
     if args.bias:
         sampler = dgl.dataloading.NeighborSampler(fan_out, prob="probs")
     else:
@@ -98,6 +92,7 @@ def main(args):
         len(np.intersect1d(train_nid.numpy(), local_nid))))
     dev_id = g.rank() % args.num_gpu
     device = th.device("cuda:" + str(dev_id))
+    th.cuda.set_device(dev_id)
     labels = g.ndata["labels"][np.arange(g.num_nodes())]
     num_classes = len(th.unique(labels[th.logical_not(th.isnan(labels))]))
     print("#Labels {}".format(num_classes))
@@ -132,6 +127,7 @@ if __name__ == "__main__":
                         default=False,
                         help="Sample with bias.")
     parser.add_argument("--batch_size", type=int, default=1000)
+    parser.add_argument('--fan_out', type=str, default='15,15,15')
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--standalone",
                         action="store_true",

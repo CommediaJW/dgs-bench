@@ -10,7 +10,7 @@ import time
 import numpy as np
 from models import SAGE, GAT
 from utils.load_graph import load_papers400m_sparse, load_ogb
-from utils.chunktensor_sampler import *
+from utils.chunktensor_sampler import create_chunktensor, create_dgs_communicator, ChunkTensorSampler
 from utils.compresser import Compresser
 
 
@@ -25,7 +25,6 @@ def run(rank, world_size, data, args, compresser):
     torch.ops.load_library(args.libdgs)
     if args.compress_feat:
         torch.ops.load_library(args.libbifeat)
-    create_dgs_communicator(world_size, rank)
 
     if args.model == 'graphsage':
         model = SAGE(feature_dim, 256, num_classes)
@@ -43,48 +42,56 @@ def run(rank, world_size, data, args, compresser):
     train_idx = train_idx.to('cuda')
 
     torch.cuda.reset_peak_memory_stats()
-    model_mem_used = torch.cuda.max_memory_reserved()
+    reserved_mem = torch.cuda.max_memory_reserved(
+    ) + 3 * 1024 * 1024 * 1024 + graph.num_nodes()
+
+    create_dgs_communicator(world_size)
+
     if not args.compress_feat:
         # chunktensor cache features
-        features = graph.ndata.pop('features')
-        avaliable_mem = get_available_memory(torch.cuda.current_device(),
-                                             model_mem_used, graph.num_nodes())
-        features_total_size = features.numel() * features.element_size()
-        features_cached_size_per_gpu = int(
-            min(features_total_size * args.feat_cache_rate // world_size,
-                avaliable_mem))
-        chunk_features = torch.classes.dgs_classes.ChunkTensor(
-            features.shape, features.dtype, features_cached_size_per_gpu)
         if dist.get_rank() == 0:
-            chunk_features._CAPI_load_from_tensor(features)
-            print(
-                "Cache features per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
-                .format(
-                    features_cached_size_per_gpu / 1024 / 1024 / 1024,
-                    features_cached_size_per_gpu * world_size /
-                    features_total_size))
+            print("create chunk features")
+        features = graph.ndata.pop('features')
+        chunk_features = create_chunktensor(features, world_size, reserved_mem,
+                                            args.feat_cache_rate)
         prefetch_node_feats = None
     else:
         prefetch_node_feats = ['features']
 
-    # create chunktensor sampler, cache probs, indices, indptr
+    # chunktensor cache probs, indices, indptr
+    if args.bias:
+        if dist.get_rank() == 0:
+            print("create chunk probs")
+        probs = graph.edata.pop('probs')
+        chunk_probs = create_chunktensor(probs, world_size, reserved_mem,
+                                         args.graph_cache_rate)
+    if dist.get_rank() == 0:
+        print("create chunk indices")
+    indices = graph.adj_sparse('csc')[1]
+    chunk_indices = create_chunktensor(indices, world_size, reserved_mem,
+                                       args.graph_cache_rate)
+    if dist.get_rank() == 0:
+        print("create chunk indptr")
+    indptr = graph.adj_sparse('csc')[0]
+    chunk_indptr = create_chunktensor(indptr, world_size, reserved_mem,
+                                      args.graph_cache_rate)
+
+    # create chunktensor sampler
     if args.bias:
         # bias sampling
         sampler = ChunkTensorSampler(
             [int(fanout) for fanout in args.fan_out.split(',')],
-            graph,
-            cache_rate=args.graph_cache_rate,
-            model_mem_used=model_mem_used,
-            prob="probs",
+            chunk_indptr,
+            chunk_indices,
+            chunk_probs=chunk_probs,
             prefetch_node_feats=prefetch_node_feats,
             prefetch_labels=['labels'])
     else:
         # uniform sampling
         sampler = ChunkTensorSampler(
             [int(fanout) for fanout in args.fan_out.split(',')],
-            graph,
-            cache_rate=args.graph_cache_rate,
-            model_mem_used=model_mem_used,
+            chunk_indptr,
+            chunk_indices,
             prefetch_node_feats=prefetch_node_feats,
             prefetch_labels=['labels'])
 

@@ -2,7 +2,7 @@ import argparse
 import time
 import torch as th
 import dgl
-from load_graph import load_papers400m_sparse, load_ogb
+from utils.load_graph import load_papers400m_sparse, load_ogb
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
