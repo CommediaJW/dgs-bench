@@ -54,8 +54,9 @@ def run(rank, world_size, data, args, compresser):
             min(features_total_size * args.feat_cache_rate // world_size,
                 avaliable_mem))
         chunk_features = torch.classes.dgs_classes.ChunkTensor(
-            features, features_cached_size_per_gpu)
+            features.shape, features.dtype, features_cached_size_per_gpu)
         if dist.get_rank() == 0:
+            chunk_features._CAPI_load_from_tensor(features)
             print(
                 "Cache features per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
                 .format(

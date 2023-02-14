@@ -4,16 +4,16 @@ import dgl
 import torch.distributed as dist
 
 
-def create_dgs_communicator(world_size, local_rank):
-    if local_rank == 0:
+def create_dgs_communicator(group_size, group_rank, local_group=None):
+    if group_rank == 0:
         unique_id_array = torch.ops.dgs_ops._CAPI_get_unique_id()
         broadcast_list = [unique_id_array]
     else:
         broadcast_list = [None]
 
-    dist.broadcast_object_list(broadcast_list, 0)
+    dist.broadcast_object_list(broadcast_list, 0, local_group)
     unique_ids = broadcast_list[0]
-    torch.ops.dgs_ops._CAPI_set_nccl(world_size, unique_ids, local_rank)
+    torch.ops.dgs_ops._CAPI_set_nccl(group_size, unique_ids, group_rank)
 
 
 def get_available_memory(device, model_mem_used, num_node):
@@ -73,8 +73,9 @@ class ChunkTensorSampler(BlockSampler):
                     get_available_memory(self.device, self.model_mem_used,
                                          self.num_node)))
             self.chunk_probs = torch.classes.dgs_classes.ChunkTensor(
-                probs, probs_cached_size_per_gpu)
+                probs.shape, probs.dtype, probs_cached_size_per_gpu)
             if dist.get_rank() == 0:
+                self.chunk_probs._CAPI_load_from_tensor(probs)
                 print(
                     "Cache probs per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
                     .format(
@@ -89,8 +90,9 @@ class ChunkTensorSampler(BlockSampler):
                 get_available_memory(self.device, self.model_mem_used,
                                      self.num_node)))
         self.chunk_indices = torch.classes.dgs_classes.ChunkTensor(
-            indices, indices_cached_size_per_gpu)
+            indices.shape, indices.dtype, indices_cached_size_per_gpu)
         if dist.get_rank() == 0:
+            self.chunk_indices._CAPI_load_from_tensor(indices)
             print(
                 "Cache indices per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
                 .format(
@@ -105,8 +107,9 @@ class ChunkTensorSampler(BlockSampler):
                 get_available_memory(self.device, self.model_mem_used,
                                      self.num_node)))
         self.chunk_indptr = torch.classes.dgs_classes.ChunkTensor(
-            indptr, indptr_cached_size_per_gpu)
+            indptr.shape, indptr.dtype, indptr_cached_size_per_gpu)
         if dist.get_rank() == 0:
+            self.chunk_indptr._CAPI_load_from_tensor(indptr)
             print(
                 "Cache indptr per GPU {:.3f} GB, all gpu total cache rate = {:.3f}"
                 .format(
