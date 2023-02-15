@@ -7,7 +7,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from dgs_create_communicator import create_dgs_communicator
 
-torch.ops.load_library('../Dist-GPU-sampling/build/libdgs.so')
+torch.ops.load_library('../Dist-GPU-sampling-main/build/libdgs.so')
 
 
 def get_available_memory(device, num_node):
@@ -37,21 +37,27 @@ def bench(rank, world_size, indptr, indices, probs, indptr_host_cache_rate,
     indptr_cache_size_per_gpu = int(
         min(avaliable_men, (1 - indptr_host_cache_rate) * indptr.numel() *
             indptr.element_size() // world_size))
-    chunk_indptr = torch.classes.dgs_classes.ChunkTensor(
-        indptr, indptr_cache_size_per_gpu)
+    chunk_indptr = torch.torch.classes.dgs_classes.ChunkTensor(
+        indptr.shape, indptr.dtype, indptr_cache_size_per_gpu)
+    if rank == 0:
+        chunk_indptr._CAPI_load_from_tensor(indptr)
     avaliable_men = get_available_memory(rank, graph_node_num)
     indices_cache_size_per_gpu = int(
         min(avaliable_men, (1 - indices_host_cache_rate) * indices.numel() *
             indices.element_size() // world_size))
-    chunk_indices = torch.classes.dgs_classes.ChunkTensor(
-        indices, indices_cache_size_per_gpu)
+    chunk_indices = torch.torch.classes.dgs_classes.ChunkTensor(
+        indices.shape, indices.dtype, indices_cache_size_per_gpu)
+    if rank == 0:
+        chunk_indices._CAPI_load_from_tensor(indices)
     if probs is not None:
         avaliable_men = get_available_memory(rank, graph_node_num)
         probs_cache_size_per_gpu = int(
             min(avaliable_men, (1 - probs_host_cache_rate) * probs.numel() *
                 probs.element_size() // world_size))
-        chunk_probs = torch.classes.dgs_classes.ChunkTensor(
-            probs, probs_cache_size_per_gpu)
+        chunk_probs = torch.torch.classes.dgs_classes.ChunkTensor(
+            probs.shape, probs.dtype, probs_cache_size_per_gpu)
+        if rank == 0:
+            chunk_probs._CAPI_load_from_tensor(probs)
         probs_fact_host_cache_rate = (
             probs.numel() * probs.element_size() - world_size *
             probs_cache_size_per_gpu) / (probs.numel() * probs.element_size())
@@ -154,15 +160,16 @@ if __name__ == '__main__':
         probs = None
     del graph
 
-    degree_log = []
-    for i in range(indptr.numel() - 1):
-        degree_log.append(indptr[i + 1] - indptr[i])
-    print('graph = {}, average degree = {:.2f}'.format(args.dataset,
-                                                       numpy.mean(degree_log)))
+    degree_sum = indptr[-1] - indptr[0]
+    print('graph = {}, average degree = {:.2f}'.format(
+        args.dataset, degree_sum / (indptr.numel() - 1)))
 
-    for world_size in [1]:
+    for world_size in [2]:
         print("#GPU = {}".format(world_size))
-        for seeds_num in [300000, 400000, 500000, 750000, 1000000]:
+        for seeds_num in [
+                1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000,
+                1000000
+        ]:
             mp.spawn(bench,
                      args=(world_size, indptr, indices, probs, 0, 0, 0, [15],
                            seeds_num),
