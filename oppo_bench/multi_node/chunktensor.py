@@ -7,7 +7,7 @@ import torch.optim as optim
 import dgl
 from models import DistSAGE, DistGAT
 from utils.load_graph import load_papers400m_sparse, load_ogb
-from utils.chunktensor_sampler import create_chunktensor, create_dgs_communicator, ChunkTensorSampler
+from utils.chunktensor_sampler import *
 
 
 def run(args, device, data, model, sampler):
@@ -96,13 +96,16 @@ def main(args):
 
     # create chunk tensors
     th.cuda.reset_peak_memory_stats()
-    reserved_mem = th.cuda.max_memory_reserved(
-    ) + 3 * 1024 * 1024 * 1024 + g.num_nodes()
 
     # create each machine's process group
     th.ops.load_library(args.libdgs)
     local_group, groups = th.distributed.new_subgroups(args.num_gpu)
     create_dgs_communicator(args.num_gpu, local_group)
+
+    available_mem = get_available_memory(
+        dev_id,
+        th.cuda.max_memory_reserved() +
+        args.reserved_mem * 1024 * 1024 * 1024 + g.num_nodes(), local_group)
 
     # each group's root process load the whole graph
     rank_in_world = th.distributed.get_rank()
@@ -143,7 +146,7 @@ def main(args):
         print("create chunk features")
     chunk_features = create_chunktensor(features,
                                         args.num_gpu,
-                                        reserved_mem,
+                                        available_mem,
                                         cache_rate=args.feat_cache_rate,
                                         root_rank=rank_in_world -
                                         rank_in_world % args.num_gpu,
@@ -151,31 +154,31 @@ def main(args):
     if args.bias:
         if rank_in_world % args.num_gpu == 0:
             print("create chunk probs")
-        chunk_probs = create_chunktensor(probs,
-                                         args.num_gpu,
-                                         reserved_mem,
-                                         cache_rate=args.graph_cache_rate,
-                                         root_rank=rank_in_world -
-                                         rank_in_world % args.num_gpu,
-                                         local_group=local_group)
+        chunk_probs = create_chunktensor(
+            probs,
+            args.num_gpu,
+            available_mem - th.ops.dgs_ops._CAPI_get_current_allocated(),
+            cache_rate=args.graph_cache_rate,
+            root_rank=rank_in_world - rank_in_world % args.num_gpu,
+            local_group=local_group)
     if rank_in_world % args.num_gpu == 0:
         print("create chunk indices")
-    chunk_indices = create_chunktensor(indices,
-                                       args.num_gpu,
-                                       reserved_mem,
-                                       cache_rate=args.graph_cache_rate,
-                                       root_rank=rank_in_world -
-                                       rank_in_world % args.num_gpu,
-                                       local_group=local_group)
+    chunk_indices = create_chunktensor(
+        indices,
+        args.num_gpu,
+        available_mem - th.ops.dgs_ops._CAPI_get_current_allocated(),
+        cache_rate=args.graph_cache_rate,
+        root_rank=rank_in_world - rank_in_world % args.num_gpu,
+        local_group=local_group)
     if rank_in_world % args.num_gpu == 0:
         print("create chunk indptr")
-    chunk_indptr = create_chunktensor(indptr,
-                                      args.num_gpu,
-                                      reserved_mem,
-                                      cache_rate=args.graph_cache_rate,
-                                      root_rank=rank_in_world -
-                                      rank_in_world % args.num_gpu,
-                                      local_group=local_group)
+    chunk_indptr = create_chunktensor(
+        indptr,
+        args.num_gpu,
+        available_mem - th.ops.dgs_ops._CAPI_get_current_allocated(),
+        cache_rate=args.graph_cache_rate,
+        root_rank=rank_in_world - rank_in_world % args.num_gpu,
+        local_group=local_group)
 
     # create chunktensor sampler
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
@@ -241,6 +244,11 @@ if __name__ == "__main__":
         help=
         'The gpu cache rate of graph structure tensors. If the gpu memory is not enough, cache priority: features > probs > indices > indptr'
     )
+    parser.add_argument(
+        '--reserved-mem',
+        default='3',
+        type=float,
+        help="The size of reserved memory (unit: GB) for model and training.")
     args = parser.parse_args()
 
     main(args)
