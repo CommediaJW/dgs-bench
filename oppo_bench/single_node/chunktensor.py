@@ -10,7 +10,7 @@ import time
 import numpy as np
 from models import SAGE, GAT
 from utils.load_graph import load_papers400m_sparse, load_ogb
-from utils.chunktensor_sampler import create_chunktensor, create_dgs_communicator, ChunkTensorSampler
+from utils.chunktensor_sampler import *
 from utils.compresser import Compresser
 
 
@@ -41,40 +41,65 @@ def run(rank, world_size, data, args, compresser):
     # move ids to GPU
     train_idx = train_idx.to('cuda')
 
-    torch.cuda.reset_peak_memory_stats()
-    reserved_mem = torch.cuda.max_memory_reserved(
-    ) + 3 * 1024 * 1024 * 1024 + graph.num_nodes()
+    if args.model == 'graphsage':
+        available_mem = get_available_memory(
+            rank,
+            torch.cuda.max_memory_reserved() + 3 * 1024 * 1024 * 1024 +
+            graph.num_nodes())
+    elif args.model == 'gat':
+        available_mem = get_available_memory(
+            rank,
+            torch.cuda.max_memory_reserved() + 11 * 1024 * 1024 * 1024 +
+            graph.num_nodes())
 
     create_dgs_communicator(world_size)
 
-    if not args.compress_feat:
+    if not args.compress_feat and not args.gpu_cache_full_feat:
         # chunktensor cache features
         if dist.get_rank() == 0:
             print("create chunk features")
         features = graph.ndata.pop('features')
-        chunk_features = create_chunktensor(features, world_size, reserved_mem,
+        chunk_features = create_chunktensor(features, world_size,
+                                            available_mem,
                                             args.feat_cache_rate)
         prefetch_node_feats = None
     else:
-        prefetch_node_feats = ['features']
+        if args.gpu_cache_full_feat:
+            features = graph.ndata.pop('features').cuda()
+            features_size = features.numel() * features.element_size()
+            prefetch_node_feats = None
+            if dist.get_rank() == 0:
+                print("Every GPU cache the full features, size = {:.3f} GB".
+                      format(features_size / 1024 / 1024 / 1024))
+            available_mem = max(available_mem - features_size, 0)
+        else:
+            prefetch_node_feats = ['features']
 
     # chunktensor cache probs, indices, indptr
     if args.bias:
         if dist.get_rank() == 0:
             print("create chunk probs")
         probs = graph.edata.pop('probs')
-        chunk_probs = create_chunktensor(probs, world_size, reserved_mem,
-                                         args.graph_cache_rate)
+        chunk_probs = create_chunktensor(
+            probs, world_size,
+            max(
+                available_mem -
+                torch.ops.dgs_ops._CAPI_get_current_allocated(), 0),
+            args.graph_cache_rate)
     if dist.get_rank() == 0:
         print("create chunk indices")
     indices = graph.adj_sparse('csc')[1]
-    chunk_indices = create_chunktensor(indices, world_size, reserved_mem,
-                                       args.graph_cache_rate)
+    chunk_indices = create_chunktensor(
+        indices, world_size,
+        max(available_mem - torch.ops.dgs_ops._CAPI_get_current_allocated(),
+            0), args.graph_cache_rate)
     if dist.get_rank() == 0:
         print("create chunk indptr")
     indptr = graph.adj_sparse('csc')[0]
-    chunk_indptr = create_chunktensor(indptr, world_size, reserved_mem,
-                                      args.graph_cache_rate)
+    chunk_indptr = create_chunktensor(
+        indptr, world_size,
+        max(available_mem - torch.ops.dgs_ops._CAPI_get_current_allocated(),
+            0), args.graph_cache_rate)
 
     # create chunktensor sampler
     if args.bias:
@@ -117,7 +142,10 @@ def run(rank, world_size, data, args, compresser):
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
             if args.compress_feat:
-                x = blocks[0].srcdata['features']
+                if args.gpu_cache_full_feat:
+                    x = features.index_select(0, input_nodes)
+                else:
+                    x = blocks[0].srcdata['features']
                 x = compresser.decompress(x, "cuda")
             else:
                 x = chunk_features._CAPI_index(input_nodes)
@@ -222,6 +250,10 @@ if __name__ == '__main__':
                         type=str,
                         default=None,
                         help="The directory to save the compressed features.")
+    parser.add_argument('--gpu-cache-full-feat',
+                        action='store_true',
+                        default=False,
+                        help="Every gpu cache the full features.")
     args = parser.parse_args()
 
     if args.dataset == "ogbn-products":

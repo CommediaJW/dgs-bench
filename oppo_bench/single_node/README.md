@@ -151,3 +151,5 @@ These 2 methods need different args:
     For `vq` mode only, the width of each codebook entries, the features would be split into Ceil (feature_dim / width) parts for vector quantization
 
   - `--compress-feat-save-root` If set, the compressed featurs will be saved in this dierctory
+
+  - `--gpu-cache-full-feat` If set, every gpu will cache the full features.

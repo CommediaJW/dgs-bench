@@ -31,13 +31,11 @@ def get_available_memory(device, reserved_mem, local_group=None):
 
 def create_chunktensor(tensor,
                        num_gpus,
-                       reserved_mem,
+                       available_mem,
                        cache_rate=1.0,
                        root_rank=0,
                        local_group=None):
 
-    available_mem = get_available_memory(torch.cuda.current_device(),
-                                         reserved_mem, local_group)
     if dist.get_rank() == root_rank:
         total_size = tensor.numel() * tensor.element_size()
         cached_size_per_gpu = int(
