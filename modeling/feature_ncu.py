@@ -1,5 +1,8 @@
+import argparse
 import torch
 from dgs_create_communicator import create_dgs_communicator_single_gpu
+
+torch.ops.load_library('../Dist-GPU-sampling/build/libdgs.so')
 
 
 def get_available_memory(device, num_node):
@@ -12,51 +15,40 @@ def get_available_memory(device, num_node):
     return available_mem.cpu().numpy()[0]
 
 
-def bench(rank, world_size, features, num_nodes_per_iteration,
-          host_cache_rate):
-    torch.manual_seed(rank)
-    print('create dgs communicator')
+def bench(features, cache_rate, num_nids_per_iteration):
+    torch.cuda.set_device(0)
+    torch.manual_seed(0)
     create_dgs_communicator_single_gpu()
 
-    print('chunk tensor cache')
     avaliable_mem = get_available_memory(
-        rank, features.shape[0]) - 1 * 1024 * 1024 * 1024
-    feature_cache_size_per_gpu = min(avaliable_mem,
-                                     (1 - host_cache_rate) * features.numel() *
-                                     features.element_size() // world_size)
-    cached_num_nodes_per_gpu = int(
-        feature_cache_size_per_gpu //
-        (features.shape[1] * features.element_size()))
-    feature_cache_size_per_gpu = cached_num_nodes_per_gpu * features.shape[
-        1] * features.element_size()
-    chunk_features = torch.classes.dgs_classes.ChunkTensor(
-        features, feature_cache_size_per_gpu)
+        0, features.shape[0]) - 2 * 1024 * 1024 * 1024
+    features_cache_size = min(
+        avaliable_mem,
+        cache_rate * features.numel() * features.element_size())
+    chunk_features = torch.torch.classes.dgs_classes.ChunkTensor(
+        features.shape, features.dtype, features_cache_size)
+    chunk_features._CAPI_load_from_tensor(features)
 
     graph_num_nodes = features.shape[0]
 
-    print('start')
-
     nids = torch.randint(0, graph_num_nodes,
-                         (num_nodes_per_iteration, )).unique().long().cuda()
+                         (num_nids_per_iteration, )).unique().long().cuda()
     torch.cuda.synchronize()
     torch.cuda.nvtx.range_push("loading")
     _ = chunk_features._CAPI_index(nids)
     torch.cuda.synchronize()
     torch.cuda.nvtx.range_pop()
 
-    print("Nids len {} | Host cache rate {:.3f}".format(
-        nids.numel(), host_cache_rate))
+    print("Nids len {} | Cache rate {:.3f}".format(nids.numel(), cache_rate))
 
 
 if __name__ == '__main__':
-    torch.ops.load_library("../Dist-GPU-sampling/build/libdgs.so")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-nodes", type=int, default=10000000)
+    parser.add_argument("--feat-dim", type=int, default=128)
+    args = parser.parse_args()
+    print(args)
 
-    torch.set_num_threads(1)
-    torch.cuda.set_device(0)
+    features = torch.ones((args.num_nodes, args.feat_dim)).float()
 
-    feature_dim = 128
-    graph_num_nodes = 10000000
-    features = torch.ones((graph_num_nodes, feature_dim)).float()
-    print('finish generating features')
-
-    bench(0, 1, features, 5000000, 0)
+    bench(features, 0, 5000000)

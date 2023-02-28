@@ -73,10 +73,11 @@ if __name__ == '__main__':
     parser.add_argument("--num-nodes", type=int, default=10000000)
     parser.add_argument("--degree", type=int, default=15)
     args = parser.parse_args()
+    print(args)
 
     indptr = torch.arange(0, args.num_nodes + 1).long() * args.degree
     indices = torch.arange(0, args.num_nodes * args.degree).long()
     num_edges = args.num_nodes * args.degree
     probs = torch.randn((num_edges, )).abs().float()
 
-    bench(0, 1, indptr, indices, probs, 0, 0, 0, [15], 200000)
+    bench(indptr, indices, probs, [1, 0, 0], 10000, [15])
