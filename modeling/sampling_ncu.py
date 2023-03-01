@@ -76,8 +76,9 @@ if __name__ == '__main__':
     print(args)
 
     indptr = torch.arange(0, args.num_nodes + 1).long() * args.degree
-    indices = torch.arange(0, args.num_nodes * args.degree).long()
+    indices = torch.randint(0, args.num_nodes,
+                            (args.num_nodes * args.degree, ))
     num_edges = args.num_nodes * args.degree
     probs = torch.randn((num_edges, )).abs().float()
 
-    bench(indptr, indices, probs, [1, 0, 0], 10000, [15])
+    bench(indptr, indices, probs, [1, 1, 1], 5000, [10])
