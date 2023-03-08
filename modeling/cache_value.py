@@ -23,7 +23,7 @@ def create_chunktensor(tensor, name, cache_size):
     return chunk_tensor
 
 
-def cache_data(data, available_mem):
+def cache_data(data, available_mem, cache_rates):
     indptr, indices, probs, features = data
 
     indptr_size = indptr.numel() * indptr.element_size()
@@ -38,60 +38,63 @@ def cache_data(data, available_mem):
 
     create_dgs_communicator_single_gpu()
 
-    # indptr_cache_size = 0
+    features_cache_size = min(
+        int(features_size * cache_rates[3]),
+        available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
+    chunk_features = create_chunktensor(features, "features",
+                                        features_cache_size)
+
     indptr_cache_size = min(
-        indptr_size,
+        int(indptr_size * cache_rates[0]),
         available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
     chunk_indptr = create_chunktensor(indptr, "indptr", indptr_cache_size)
 
-    indices_cache_size = 0
-    # indices_cache_size = min(
-    #     indices_size,
-    #     available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
-    chunk_indices = create_chunktensor(indices, "indices", indices_cache_size)
-
-    # probs_cache_size = 0
     probs_cache_size = min(
-        probs_size,
+        int(probs_size * cache_rates[2]),
         available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
     chunk_probs = create_chunktensor(probs, "probs", probs_cache_size)
 
-    features_cache_size = 0
-    # features_cache_size = min(
-    #     features_size,
-    #     available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
-    chunk_features = create_chunktensor(features, "features",
-                                        features_cache_size)
+    indices_cache_size = min(
+        int(indices_size * cache_rates[1]),
+        available_mem - torch.torch.ops.dgs_ops._CAPI_get_current_allocated())
+    chunk_indices = create_chunktensor(indices, "indices", indices_cache_size)
 
     return chunk_indptr, chunk_indices, chunk_probs, chunk_features
 
 
 def run(args, data):
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
-    available_men = 4 * 1024 * 1024 * 1024
+    cache_rates = [int(rate) for rate in args.cache_rates.split(',')]
+    available_men = 9 * 1024 * 1024 * 1024
     chunk_indptr, chunk_indices, chunk_probs, chunk_features = cache_data(
-        data, available_men)
+        data, available_men, cache_rates)
 
     sampling_time_log = []
     loading_time_log = []
     total_time_log = []
+    seeds_num_log = []
+    frontier_num_log = []
 
     for i in range(30):
         seeds = torch.randint(0, args.num_nodes,
                               (args.batch_size, )).unique().long().cuda()
+        seeds_num_log.append(seeds.numel())
+        sampling_time = 0
         torch.cuda.synchronize()
         total_start = time.time()
         for num_picks in fan_out:
+            torch.cuda.synchronize()
+            start = time.time()
             coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_probs_with_chunk_tensor(
                 seeds, chunk_indptr, chunk_indices, chunk_probs, num_picks,
                 False)
+            torch.cuda.synchronize()
+            sampling_time += time.time() - start
             frontier, (coo_row,
                        coo_col) = torch.ops.dgs_ops._CAPI_tensor_relabel(
                            [seeds, coo_col], [coo_row, coo_col])
             seeds = frontier
-        torch.cuda.synchronize()
-        end = time.time()
-        sampling_time_log.append(end - total_start)
+        sampling_time_log.append(sampling_time)
 
         del seeds, coo_row, coo_col
 
@@ -99,20 +102,22 @@ def run(args, data):
         _ = chunk_features._CAPI_index(frontier)
         torch.cuda.synchronize()
         end = time.time()
+        frontier_num_log.append(frontier.numel())
         loading_time_log.append(end - start)
         total_time_log.append(end - total_start)
 
     print(
-        "Sampling time {:.3f} ms | Loading time {:.3f} ms | Total time {:.3f} ms"
-        .format(
-            numpy.mean(sampling_time_log[3:]) * 1000,
-            numpy.mean(loading_time_log[3:]) * 1000,
-            numpy.mean(total_time_log[3:]) * 1000))
+        "#Seeds {:.3f} | #Frontier {:.3f} | Sampling time {:.3f} ms | Loading time {:.3f} ms | Total time {:.3f} ms"
+        .format(numpy.mean(seeds_num_log[3:]),
+                numpy.mean(frontier_num_log[3:]),
+                numpy.mean(sampling_time_log[3:]) * 1000,
+                numpy.mean(loading_time_log[3:]) * 1000,
+                numpy.mean(total_time_log[3:]) * 1000))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-nodes", type=int, default=10000000)
+    parser.add_argument("--num-nodes", type=int, default=20000000)
     parser.add_argument("--degree", type=int, default=15)
     parser.add_argument("--feat-dim", type=int, default=128)
     parser.add_argument("--batch-size",
@@ -120,6 +125,7 @@ if __name__ == '__main__':
                         type=int,
                         help="The number of seeds of sampling.")
     parser.add_argument('--fan-out', type=str, default='15,15,15')
+    parser.add_argument('--cache-rates', type=str, default='0,0,0,0')
     args = parser.parse_args()
     print(args)
 

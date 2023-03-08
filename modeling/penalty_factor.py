@@ -40,7 +40,8 @@ def bench(rank, world_size, libdgs, features, num_nodes_per_iteration,
     feature_cache_size_per_gpu = cached_num_nodes_per_gpu * features.shape[
         1] * features.element_size()
     chunk_features = torch.classes.dgs_classes.ChunkTensor(
-        features, feature_cache_size_per_gpu)
+        features.shape, features.dtype, feature_cache_size_per_gpu)
+    chunk_features._CAPI_load_from_tensor(features)
 
     graph_num_nodes = features.shape[0]
 
@@ -114,21 +115,24 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     feature_dim = 128
-    graph_num_nodes = 20000000
+    graph_num_nodes = 15000000
 
     # unit: GB/s
     bandwidth_local = 1300
-    bandwidth_inter_gpu = 262.65
-    bandwidth_pcie = 31.05
+    bandwidth_inter_gpu = 262
+    bandwidth_pcie = 31
+
+    print("graph num nodes:", graph_num_nodes)
+    print("feature dim:", feature_dim)
 
     import torch.multiprocessing as mp
-    for world_size in [2]:
+    for world_size in [1]:
         features = torch.ones(
             (graph_num_nodes * world_size, feature_dim)).float()
         print("#GPU = {}".format(world_size))
-        for host_cache_rate in [0.2, 0.4, 0.6]:
+        for host_cache_rate in [0]:
             for nodes_per_iteration in [
-                    5000000, 7500000, 10000000, 15000000, 20000000
+                    100000, 200000, 500000, 750000, 1000000, 1500000, 2000000
             ]:
                 mp.spawn(bench,
                          args=(world_size, args.libdgs, features,
