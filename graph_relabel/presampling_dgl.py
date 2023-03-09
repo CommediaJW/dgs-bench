@@ -44,3 +44,9 @@ if __name__ == '__main__':
         reversed_graph.ndata["_P"] = reversed_graph.ndata["_P"].add(
             reversed_graph.ndata["_tp"])
     probability = reversed_graph.ndata.pop("_P")
+
+    if args.save_root:
+        save_fn = os.path.join(args.save_root,
+                               args.dataset + "_presampling_probility.pkl")
+        torch.save(probability, save_fn)
+        print("probility saved to", save_fn)
