@@ -1,6 +1,6 @@
 import argparse
 import os
-import numpy
+import time
 import torch
 from utils.load_graph import *
 
@@ -28,6 +28,7 @@ if __name__ == '__main__':
         graph, num_classes = load_papers400m_sparse(root=args.root,
                                                     load_true_features=False)
 
+    start = time.time()
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
     train_nids = graph.nodes()[graph.ndata['train_mask'].bool()]
     reversed_graph = dgl.reverse(graph, copy_ndata=False)
@@ -46,6 +47,8 @@ if __name__ == '__main__':
         reversed_graph.ndata["_P"] = reversed_graph.ndata["_P"].add(
             reversed_graph.ndata["_tp"])
     probability = reversed_graph.ndata.pop("_P")
+    end = time.time()
+    print("Presampling time {:.3f} s".format(end - start))
 
     if args.save_root:
         save_fn = os.path.join(args.save_root,

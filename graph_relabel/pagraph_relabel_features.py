@@ -41,16 +41,19 @@ def run(args, graph):
 
     features = graph.ndata.pop("features")
     pagraph_cacher = GraphCacheServer(features)
-    if args.feat_weight:
-        feat_cache_nodes_num = 1807611
-        print("features cache nodes num =", feat_cache_nodes_num)
-        feat_weight = torch.load(args.feat_weight)
+    feat_cache_nodes_num = 2305438
+    print("features cache nodes num =", feat_cache_nodes_num)
+    if args.feat_sort_weight:
+        feat_sort_weight = torch.load(args.feat_sort_weight)
         cache_nids = torch.argsort(
-            feat_weight, descending=True)[:feat_cache_nodes_num].long().cuda()
+            feat_sort_weight,
+            descending=True)[:feat_cache_nodes_num].long().cuda()
         pagraph_cacher.cache_data(cache_nids)
     else:
-        cache_nids = torch.arange(0, graph.num_nodes()).cuda()
-        pagraph_cacher.cache_data(cache_nids, reorder=False)
+        cache_nids, reorder = pagraph_cacher.get_cache_nid(
+            graph,
+            feat_cache_nodes_num * features.element_size() * features.shape[1])
+        pagraph_cacher.cache_data(cache_nids, reorder)
 
     loading_time_log = []
     for _ in range(args.num_epochs):
@@ -93,7 +96,7 @@ if __name__ == '__main__':
                         default='../Dist-GPU-sampling/build/libdgs.so',
                         help='Path of libdgs.so')
     parser.add_argument('--num-epochs', type=int, default="1")
-    parser.add_argument('--feat-weight', type=str, default=None)
+    parser.add_argument('--feat-sort-weight', type=str, default=None)
     args = parser.parse_args()
     print(args)
 

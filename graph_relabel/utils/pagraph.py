@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import time
 
 
 class GraphCacheServer:
@@ -15,13 +16,14 @@ class GraphCacheServer:
 
     def get_cache_nid(self, graph, capability):
         type_size = self.nfeats.element_size()
-
         if capability >= self.nfeats.numel() * type_size:
             if self.gpuid == 0:
                 print("[Pagraph] cache rate = 1.00")
-            return torch.arange(graph.num_nodes()).cuda(self.gpuid)
+            reorder = False
+            return torch.arange(graph.num_nodes()).cuda(self.gpuid), reorder
 
         else:
+            start = time.time()
             if '_P' in graph.ndata and True:
                 sort_nids = torch.argsort(graph.ndata['_P'], descending=True)
             elif 'out_degrees' in graph.ndata:
@@ -36,22 +38,33 @@ class GraphCacheServer:
                 sort_nids = torch.argsort(out_degrees, descending=True)
             cache_node_num = capability // (self.feat_dim * type_size)
             cache_nids = sort_nids[:cache_node_num]
+            end = time.time()
 
             if self.gpuid == 0:
+                print("[Pagraph] sorting nodes takes {:.3f} s".format(end -
+                                                                      start))
                 print("[Pagraph] cache rate = {:.2f}".format(
                     capability / (self.nfeats.numel() * type_size)))
 
-            return cache_nids.cuda(self.gpuid)
+            reorder = True
+            return cache_nids.cuda(self.gpuid), reorder
 
     def cache_data(self, cache_nids, reorder=True):
         self.reordered = reorder
         if self.reordered:
+
+            torch.cuda.synchronize()
+            start = time.time()
             cache_node_num = cache_nids.numel()
             nid_in_gpu = torch.arange(cache_node_num).cuda(self.gpuid)
             self.hash_key, self.hash_val = torch.ops.dgs_ops._CAPI_create_hash_map(
                 cache_nids, nid_in_gpu)
             self.hash_key.requires_grad_(False)
             self.hash_val.requires_grad_(False)
+            torch.cuda.synchronize()
+            end = time.time()
+            print("[Pagraph] gpu {} creating hash map takes {:.3f} s".format(
+                self.gpuid, end - start))
 
             self.gpu_cached_data = self.nfeats[cache_nids].cuda(self.gpuid)
             self.nfeats = self.nfeats.pin_memory()
