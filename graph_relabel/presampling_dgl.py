@@ -29,8 +29,10 @@ if __name__ == '__main__':
                                                     load_true_features=False)
 
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
-    train_nids = graph.nodes()[graph.ndata['train_mask'].bool()].cuda()
+    train_nids = graph.nodes()[graph.ndata['train_mask'].bool()]
     reversed_graph = dgl.reverse(graph, copy_ndata=False)
+    del graph
+
     reversed_graph.ndata["_P"] = torch.zeros(reversed_graph.num_nodes())
     reversed_graph.ndata["_P"][train_nids] = 1
     for layer in range(len(fan_out)):
