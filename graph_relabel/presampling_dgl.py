@@ -29,6 +29,7 @@ if __name__ == '__main__':
                                                     load_true_features=False)
 
     start = time.time()
+
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
     train_nids = graph.nodes()[graph.ndata['train_mask'].bool()]
     reversed_graph = dgl.reverse(graph, copy_ndata=False)
@@ -44,14 +45,21 @@ if __name__ == '__main__':
             torch.ones(reversed_graph.num_nodes()))
         reversed_graph.update_all(dgl.function.copy_u("_p", "m"),
                                   dgl.function.sum("m", "_tp"))
+        sampling_weight = reversed_graph.ndata["_P"]
         reversed_graph.ndata["_P"] = reversed_graph.ndata["_P"].add(
             reversed_graph.ndata["_tp"])
-    probability = reversed_graph.ndata.pop("_P")
+
+    feature_weight = reversed_graph.ndata.pop("_P")
+
     end = time.time()
     print("Presampling time {:.3f} s".format(end - start))
 
     if args.save_root:
-        save_fn = os.path.join(args.save_root,
-                               args.dataset + "_presampling_probility.pkl")
-        torch.save(probability, save_fn)
-        print("probility saved to", save_fn)
+        feature_save_fn = os.path.join(
+            args.save_root, args.dataset + "_presampling_feature_weight.pkl")
+        torch.save(feature_weight, feature_save_fn)
+        print("feature weight saved to", feature_save_fn)
+        sampling_save_fn = os.path.join(
+            args.save_root, args.dataset + "_presampling_sampling_weight.pkl")
+        torch.save(sampling_weight, sampling_save_fn)
+        print("sampling weight saved to", sampling_save_fn)
