@@ -32,8 +32,8 @@ def run(args, graph):
     indptr = graph.adj_sparse('csc')[0]
     indices = graph.adj_sparse('csc')[1]
 
-    indptr_cache_size = indptr.numel() * indptr.element_size()
-    indices_cache_size = indices.numel() * indices.element_size()
+    indptr_cache_size = 8315974 * indptr.element_size()
+    indices_cache_size = 70969451 * indices.element_size()
 
     create_dgs_communicator_single_gpu()
     chunk_indptr = create_chunktensor(indptr, indptr_cache_size)
@@ -41,13 +41,12 @@ def run(args, graph):
 
     features = graph.ndata.pop("features")
     pagraph_cacher = GraphCacheServer(features)
-    feat_cache_nodes_num = 2305438
+    feat_cache_nodes_num = 222600
     print("features cache nodes num =", feat_cache_nodes_num)
     if args.feat_sort_weight:
         feat_sort_weight = torch.load(args.feat_sort_weight)
-        cache_nids = torch.argsort(
-            feat_sort_weight,
-            descending=True)[:feat_cache_nodes_num].long().cuda()
+        sort_nids = torch.argsort(feat_sort_weight, descending=True).long()
+        cache_nids = sort_nids[:feat_cache_nodes_num].cuda()
         pagraph_cacher.cache_data(cache_nids)
     else:
         cache_nids, reorder = pagraph_cacher.get_cache_nid(
@@ -55,7 +54,11 @@ def run(args, graph):
             feat_cache_nodes_num * features.element_size() * features.shape[1])
         pagraph_cacher.cache_data(cache_nids, reorder)
 
+    reorder_map = torch.zeros((graph.num_nodes(), )).long()
+    reorder_map[sort_nids] = torch.arange(0, graph.num_nodes())
+
     loading_time_log = []
+    feat_hit_log = []
     for _ in range(args.num_epochs):
         for it, seeds_nids in enumerate(train_seedloader):
             seeds = seeds_nids
@@ -67,6 +70,11 @@ def run(args, graph):
                                [seeds, coo_col], [coo_row, coo_col])
                 seeds = frontier
 
+            feat_hit_log.append(
+                numpy.intersect1d(
+                    reorder_map.index_select(0, frontier.cpu()).numpy(),
+                    numpy.arange(0, feat_cache_nodes_num)).size /
+                frontier.numel())
             torch.cuda.synchronize()
             start = time.time()
             feature = pagraph_cacher.fetch_data(frontier)
@@ -75,7 +83,8 @@ def run(args, graph):
 
             loading_time_log.append(end - start)
 
-    print("Loading time {:.3f} ms".format(numpy.mean(loading_time_log) * 1000))
+    print("Loading time {:.3f} ms | GPU cached feature hit rate {:.3f}".format(
+        numpy.mean(loading_time_log[3:]) * 1000, numpy.mean(feat_hit_log[3:])))
 
 
 if __name__ == '__main__':

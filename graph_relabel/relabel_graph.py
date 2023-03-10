@@ -1,5 +1,6 @@
 import torch
 import numpy
+import time
 import dgl
 import argparse
 import os
@@ -46,8 +47,10 @@ if __name__ == '__main__':
     indices = graph.adj_sparse('csc')[1]
     eid = graph.adj_sparse('csc')[2]
 
-    th.ops.load_library(args.libdgs)
-    relabel_graph_tensors, relabel_map = th.ops.dgs_ops._CAPI_csc_graph_relabel(
+    torch.ops.load_library(args.libdgs)
+
+    start = time.time()
+    relabel_graph_tensors, relabel_map = torch.ops.dgs_ops._CAPI_csc_graph_relabel(
         (indptr, indices, eid), inversed_relabel_map)
 
     relabel_graph = dgl.graph(("csc", relabel_graph_tensors))
@@ -58,8 +61,9 @@ if __name__ == '__main__':
     for key in graph.edata:
         relabel_graph.edata[key] = feature_relabel(graph.ndata[key],
                                                    relabel_graph_tensors[2])
+    end = time.time()
 
-    print("finish relabel")
+    print("finish relabel, time cost = {:.3f} s".format(end - start))
     print(relabel_graph)
     if args.save_root:
         save_fn = os.path.join(args.save_root,

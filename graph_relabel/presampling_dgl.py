@@ -56,10 +56,12 @@ if __name__ == '__main__':
 
     if args.save_root:
         feature_save_fn = os.path.join(
-            args.save_root, args.dataset + "_presampling_feature_weight.pkl")
+            args.save_root, args.dataset + "_presampling_" + args.fan_out +
+            "_feature_weight.pkl")
         torch.save(feature_weight, feature_save_fn)
         print("feature weight saved to", feature_save_fn)
         sampling_save_fn = os.path.join(
-            args.save_root, args.dataset + "_presampling_sampling_weight.pkl")
+            args.save_root, args.dataset + "_presampling_" + args.fan_out +
+            "_sampling_weight.pkl")
         torch.save(sampling_weight, sampling_save_fn)
         print("sampling weight saved to", sampling_save_fn)

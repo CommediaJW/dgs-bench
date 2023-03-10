@@ -57,6 +57,8 @@ if __name__ == '__main__':
 
         if args.loading_info:
             print("Feature dim =", graph.ndata["features"].shape[1])
+            print("Feature type size =",
+                  graph.ndata["features"].element_size())
 
         if args.sampling_info:
             indptr = graph.adj_sparse('csc')[0]

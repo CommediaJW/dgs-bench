@@ -31,9 +31,9 @@ def run(args, graph):
     indptr = graph.adj_sparse('csc')[0]
     indices = graph.adj_sparse('csc')[1]
 
-    cache_seeds_num = 0
-    indptr_cache_size = 0 * indptr.element_size()
-    indices_cache_size = 0 * indices.element_size()
+    cache_seeds_num = 4314632
+    indptr_cache_size = 8315974 * indptr.element_size()
+    indices_cache_size = 70969451 * indices.element_size()
 
     create_dgs_communicator_single_gpu()
 

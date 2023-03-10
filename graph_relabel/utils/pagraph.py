@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import time
 
 
@@ -52,7 +51,6 @@ class GraphCacheServer:
     def cache_data(self, cache_nids, reorder=True):
         self.reordered = reorder
         if self.reordered:
-
             torch.cuda.synchronize()
             start = time.time()
             cache_node_num = cache_nids.numel()
