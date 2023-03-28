@@ -4,54 +4,6 @@ import numpy as np
 import os
 
 
-def load_reddit():
-    from dgl.data import RedditDataset
-
-    data = RedditDataset(self_loop=True)
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_pubmed():
-    from dgl.data import PubmedGraphDataset
-
-    data = PubmedGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_citeseer():
-    from dgl.data import CiteseerGraphDataset
-
-    data = CiteseerGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
-def load_cora():
-    from dgl.data import CoraGraphDataset
-
-    data = CoraGraphDataset()
-    g = data[0]
-    g.ndata['features'] = g.ndata['feat']
-    g.ndata['labels'] = g.ndata['label']
-    g.ndata.pop('feat')
-    g.ndata.pop('label')
-    return g, data.num_classes
-
-
 def load_papers400m_sparse(root="dataset", load_true_features=True):
     if os.path.exists(os.path.join(root, 'papers400M_sparse.dgl')):
         print('load papers400M_sparse.dgl')
@@ -325,20 +277,6 @@ def load_ogb(name, root="dataset"):
     graph.ndata['val_mask'] = val_mask
     graph.ndata['test_mask'] = test_mask
     print('finish constructing', name)
-    return graph, num_labels
-
-
-def load_rand_generated():
-    coo_row = th.randint(0, 1000000, (10000000, ))
-    coo_col = th.randint(0, 1000000, (10000000, ))
-    graph = dgl.graph((coo_row, coo_col))
-    num_labels = 6
-
-    graph.ndata['labels'] = th.randint(0, num_labels, (graph.num_nodes(), ))
-    graph.ndata['features'] = th.rand((graph.num_nodes(), 128))
-    graph.ndata['out_degrees'] = graph.out_degrees()
-    graph.ndata['train_mask'] = th.ones(graph.num_nodes(), dtype=th.bool)
-
     return graph, num_labels
 
 
