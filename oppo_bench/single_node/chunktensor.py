@@ -134,13 +134,20 @@ def run(rank, world_size, data, args, compresser):
     if rank == 0:
         print('start training...')
     iteration_time_log = []
+    sampling_time_log = []
+    loading_time_log = []
+    training_time_log = []
     for epoch in range(args.num_epochs):
         model.train()
 
         torch.cuda.synchronize()
-        start = time.time()
+        sampling_start = time.time()
         for it, (input_nodes, output_nodes,
                  blocks) in enumerate(train_dataloader):
+            torch.cuda.synchronize()
+            sampling_end = time.time()
+
+            loading_start = time.time()
             if args.compress_feat:
                 if args.gpu_cache_full_feat:
                     x = features.index_select(0, input_nodes)
@@ -150,6 +157,10 @@ def run(rank, world_size, data, args, compresser):
             else:
                 x = chunk_features._CAPI_index(input_nodes)
             y = blocks[-1].dstdata['labels']
+            torch.cuda.synchronize()
+            loading_end = time.time()
+
+            training_start = time.time()
             y_hat = model(blocks, x)
             loss = F.cross_entropy(y_hat, y.long())
             opt.zero_grad()
@@ -157,8 +168,12 @@ def run(rank, world_size, data, args, compresser):
             opt.step()
 
             torch.cuda.synchronize()
-            end = time.time()
-            iteration_time_log.append(end - start)
+            training_end = time.time()
+
+            sampling_time_log.append(sampling_end - sampling_start)
+            loading_time_log.append(loading_end - loading_start)
+            training_time_log.append(training_end - training_start)
+            iteration_time_log.append(training_end - sampling_start)
 
             if it % 20 == 0 and rank == 0 and args.print_train:
                 acc = MF.accuracy(y_hat,
@@ -169,16 +184,15 @@ def run(rank, world_size, data, args, compresser):
                     epoch, it, loss.item(), acc.item()))
 
             torch.cuda.synchronize()
-            start = time.time()
+            sampling_start = time.time()
 
-    avg_iteration_time = np.mean(iteration_time_log[5:])
-    all_gather_list = [None for _ in range(world_size)]
-    dist.all_gather_object(all_gather_list, avg_iteration_time)
-    avg_iteration_time = np.mean(all_gather_list)
-    throughput = args.batch_size * world_size / avg_iteration_time.item()
-    if rank == 0:
-        print('Time per iteration {:.3f} ms | Throughput {:.3f} seeds/sec'.
-              format(avg_iteration_time * 1000, throughput))
+    print(
+        "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms"
+        .format(rank,
+                np.mean(sampling_time_log[5:]) * 1000,
+                np.mean(loading_time_log[5:]) * 1000,
+                np.mean(training_time_log[5:]) * 1000,
+                np.mean(iteration_time_log[5:]) * 1000))
 
 
 if __name__ == '__main__':

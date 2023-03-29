@@ -26,7 +26,7 @@ class SAGE(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList()
         self.layers.append(dglnn.SAGEConv(in_feats, n_hidden, 'mean'))
-        self.layers.append(dglnn.SAGEConv(n_hidden, n_hidden, 'mean'))
+        # self.layers.append(dglnn.SAGEConv(n_hidden, n_hidden, 'mean'))
         self.layers.append(dglnn.SAGEConv(n_hidden, n_classes, 'mean'))
         self.dropout = nn.Dropout(0.5)
         self.n_hidden = n_hidden

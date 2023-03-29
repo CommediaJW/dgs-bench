@@ -107,9 +107,12 @@ def run(rank, world_size, data, args):
     sampling_time_log = []
     loading_time_log = []
     training_time_log = []
+    epoch_iterations_log = []
+    epoch_time_log = []
     for epoch in range(args.num_epochs):
         model.train()
 
+        epoch_start = time.time()
         for it, seed_nids in enumerate(train_dataloader):
             torch.cuda.synchronize()
             sampling_start = time.time()
@@ -139,13 +142,20 @@ def run(rank, world_size, data, args):
             training_time_log.append(training_end - training_start)
             iteration_time_log.append(training_end - sampling_start)
 
+        torch.cuda.synchronize()
+        epoch_end = time.time()
+        epoch_iterations_log.append(it)
+        epoch_time_log.append(epoch_end - epoch_start)
+
     print(
-        "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms"
+        "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
                 np.mean(sampling_time_log[5:]) * 1000,
                 np.mean(loading_time_log[5:]) * 1000,
                 np.mean(training_time_log[5:]) * 1000,
-                np.mean(iteration_time_log[5:]) * 1000))
+                np.mean(iteration_time_log[5:]) * 1000,
+                np.mean(epoch_iterations_log),
+                np.mean(epoch_time_log) * 1000))
 
 
 if __name__ == '__main__':

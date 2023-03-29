@@ -33,30 +33,32 @@ def run(args, graph, num_classes):
                                      shuffle=True,
                                      drop_last=False)
 
-    sampling_weight = torch.load(args.sampling_weight)
-    sampling_relabel_map = torch.argsort(sampling_weight,
-                                         descending=True).long()
-    feat_weight = torch.load(args.feat_weight)
-    feat_weight = feat_weight.index_select(0, sampling_relabel_map)
+    # sampling_weight = torch.load(args.sampling_weight)
+    # sampling_relabel_map = torch.argsort(sampling_weight,
+    #                                      descending=True).long()
+    # feat_weight = torch.load(args.feat_weight)
+    # feat_weight = feat_weight.index_select(0, sampling_relabel_map)
 
     features = graph.ndata.pop("features")
-    pagraph_cacher = GraphCacheServer(features)
-    feat_cache_nodes_num = int(8 * 1024 * 1024 * 1024 /
-                               features.element_size() / features.shape[1])
-    print("features cache nodes num =", feat_cache_nodes_num)
-    if args.feat_weight:
-        cache_nids = torch.argsort(
-            feat_weight, descending=True)[:feat_cache_nodes_num].long().cuda()
-        pagraph_cacher.cache_data(cache_nids, True)
-    else:
-        cache_nids, reorder = pagraph_cacher.get_cache_nid(
-            graph,
-            feat_cache_nodes_num * features.element_size() * features.shape[1])
-        pagraph_cacher.cache_data(cache_nids, reorder)
+    # pagraph_cacher = GraphCacheServer(features)
+    # feat_cache_nodes_num = 1
+    # print("features cache nodes num =", feat_cache_nodes_num)
+    # if args.feat_weight:
+    #     cache_nids = torch.argsort(
+    #         feat_weight, descending=True)[:feat_cache_nodes_num].long().cuda()
+    #     pagraph_cacher.cache_data(cache_nids, True)
+    # else:
+    #     cache_nids, reorder = pagraph_cacher.get_cache_nid(
+    #         graph,
+    #         feat_cache_nodes_num * features.element_size() * features.shape[1])
+    #     pagraph_cacher.cache_data(cache_nids, reorder)
 
     indptr = graph.adj_sparse('csc')[0]
     indices = graph.adj_sparse('csc')[1]
     create_dgs_communicator_single_gpu()
+    feature_cache_size = 0
+    chunk_feature = create_chunktensor(features, feature_cache_size)
+    print("feature cache size =", feature_cache_size / 1024 / 1024, "MB")
     indptr_cache_size = 0
     chunk_indptr = create_chunktensor(indptr, indptr_cache_size)
     print("indptr cache size =", indptr_cache_size / 1024 / 1024, "MB")
@@ -84,7 +86,7 @@ def run(args, graph, num_classes):
 
             torch.cuda.synchronize()
             start = time.time()
-            x = pagraph_cacher.fetch_data(frontier)
+            x = chunk_feature._CAPI_index(frontier)
             torch.cuda.synchronize()
             end = time.time()
             loading_time_log.append(end - start)
