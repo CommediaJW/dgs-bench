@@ -1,6 +1,7 @@
 import argparse
 import torch
 from dgs_create_communicator import create_dgs_communicator_single_gpu
+from load_graph import *
 
 torch.ops.load_library('../Dist-GPU-sampling/build/libdgs.so')
 
@@ -37,12 +38,13 @@ def bench(indptr, indices, probs, cache_rates, seeds_num, fan_outs):
         indices.shape, indices.dtype, indices_cache_size)
     chunk_indices._CAPI_load_from_tensor(indices)
 
-    probs_cache_size = min(
-        available_mem - torch.ops.dgs_ops._CAPI_get_current_allocated(),
-        int(probs.numel() * probs.element_size() * cache_rates[2]))
-    chunk_probs = torch.torch.classes.dgs_classes.ChunkTensor(
-        probs.shape, probs.dtype, probs_cache_size)
-    chunk_probs._CAPI_load_from_tensor(probs)
+    if probs is not None:
+        probs_cache_size = min(
+            available_mem - torch.ops.dgs_ops._CAPI_get_current_allocated(),
+            int(probs.numel() * probs.element_size() * cache_rates[2]))
+        chunk_probs = torch.torch.classes.dgs_classes.ChunkTensor(
+            probs.shape, probs.dtype, probs_cache_size)
+        chunk_probs._CAPI_load_from_tensor(probs)
 
     seeds = torch.randint(0, graph_node_num,
                           (seeds_num, )).unique().long().cuda()
@@ -51,8 +53,13 @@ def bench(indptr, indices, probs, cache_rates, seeds_num, fan_outs):
     for fan_out in fan_outs:
         torch.cuda.synchronize()
         torch.cuda.nvtx.range_push("sampling")
-        coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_probs_with_chunk_tensor(
-            seeds, chunk_indptr, chunk_indices, chunk_probs, fan_out, False)
+        if probs is not None:
+            coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_probs_with_chunk_tensor(
+                seeds, chunk_indptr, chunk_indices, chunk_probs, fan_out,
+                False)
+        else:
+            coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_chunk_tensor(
+                seeds, chunk_indptr, chunk_indices, fan_out, False)
         torch.cuda.synchronize()
         torch.cuda.nvtx.range_pop()
         frontier, (coo_row, coo_col) = torch.ops.dgs_ops._CAPI_tensor_relabel(
@@ -72,13 +79,39 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-nodes", type=int, default=10000000)
     parser.add_argument("--degree", type=int, default=15)
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        choices=["ogbn-products", "ogbn-papers100M", "ogbn-papers400M"])
+    parser.add_argument('--root',
+                        default='dataset/',
+                        help='Path of the dataset.')
+    parser.add_argument('--bias',
+                        action='store_true',
+                        default=False,
+                        help="Sample with bias.")
     args = parser.parse_args()
     print(args)
 
-    indptr = torch.arange(0, args.num_nodes + 1).long() * args.degree
-    indices = torch.randint(0, args.num_nodes,
-                            (args.num_nodes * args.degree, ))
-    num_edges = args.num_nodes * args.degree
-    probs = torch.randn((num_edges, )).abs().float()
+    if args.dataset is not None:
+        if args.dataset == "ogbn-products":
+            graph, num_classes = load_ogb("ogbn-products", root=args.root)
+        elif args.dataset == "ogbn-papers100M":
+            graph, num_classes = load_ogb("ogbn-papers100M", root=args.root)
+        elif args.dataset == "ogbn-papers400M":
+            graph, num_classes = load_papers400m_sparse(root=args.root)
+        indptr = graph.adj_sparse("csc")[0]
+        indices = graph.adj_sparse("csc")[1]
+        num_edges = graph.num_edges()
+        del graph
+    else:
+        indptr = torch.arange(0, args.num_nodes + 1).long() * args.degree
+        indices = torch.randint(0, args.num_nodes,
+                                (args.num_nodes * args.degree, ))
 
-    bench(indptr, indices, probs, [1, 1, 1], 5000, [10])
+    if args.bias:
+        num_edges = args.num_nodes * args.degree
+        probs = torch.randn((num_edges, )).abs().float()
+        bench(indptr, indices, probs, [1, 1, 1], 5000, [10, 10, 10])
+    else:
+        bench(indptr, indices, None, [1, 1, 0], 5000, [10, 10, 10])
