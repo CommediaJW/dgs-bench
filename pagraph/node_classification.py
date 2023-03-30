@@ -9,9 +9,10 @@ import time
 import numpy as np
 from utils.models import SAGE
 from utils.load_graph import load_papers400m_sparse, load_ogb
-from GraphCache.cache import StructureCacheServer, FeatureCacheServer, get_node_heat_node_classification, get_cache_nids, get_available_memory
-from GraphCache.utils import partition_train_nids
+from GraphCache.cache import StructureCacheServer, FeatureCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
+
+torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
 
 
 def get_local_subgraph(graph: dgl.DGLGraph, local_train_nids, num_hops):
@@ -22,10 +23,48 @@ def get_local_subgraph(graph: dgl.DGLGraph, local_train_nids, num_hops):
     return local_subgraph
 
 
-def run(rank, world_size, data, args):
-    graph, num_classes = data
+def preprocess(graph, fan_out, num_gpus):
 
-    torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
+    start = time.time()
+
+    train_nids = torch.nonzero(graph.ndata['train_mask']).squeeze(1)
+    train_nids = train_nids[torch.randperm(train_nids.shape[0])]
+    num_train_nids_per_gpu = (train_nids.shape[0] + num_gpus - 1) // num_gpus
+
+    avg_feature_size = graph.ndata["features"].numel(
+    ) * graph.ndata["features"].element_size() / graph.num_nodes()
+
+    local_train_nids_list = []
+    feature_cache_nids_list = []
+
+    for device in range(num_gpus):
+        local_train_nids = train_nids[device *
+                                      num_train_nids_per_gpu:(device + 1) *
+                                      num_train_nids_per_gpu]
+        local_part = get_local_subgraph(graph, local_train_nids, len(fan_out))
+        out_degrees = local_part.out_degrees()
+        local_nids = local_part.nodes()
+        sorted_local_nids = local_nids[torch.argsort(out_degrees)]
+
+        available_mem = get_available_memory(device, 8 * 1024 * 1024 * 1024)
+        print("GPU {}, available memory size = {:.3f} GB".format(
+            device, available_mem / 1024 / 1024 / 1024))
+
+        cached_nids_num = min(int(available_mem / avg_feature_size),
+                              sorted_local_nids.numel())
+        cached_nids = sorted_local_nids[:cached_nids_num]
+
+        local_train_nids_list.append(local_train_nids.numpy())
+        feature_cache_nids_list.append(cached_nids.numpy())
+
+    end = time.time()
+    print("Preprocess time: {:.3f} seconds".format(end - start))
+
+    return local_train_nids_list, feature_cache_nids_list
+
+
+def run(rank, world_size, data, args):
+    graph, num_classes, train_nids_list, feature_cache_nids_list = data
 
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
@@ -33,8 +72,6 @@ def run(rank, world_size, data, args):
                             world_size=world_size,
                             rank=rank)
     torch.cuda.reset_peak_memory_stats()
-
-    fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
 
     # create model
     model = SAGE(graph.ndata['features'].shape[1], 256, num_classes)
@@ -44,50 +81,35 @@ def run(rank, world_size, data, args):
                                                 output_device=rank)
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 
-    # partition train nids, get local partition
-    train_idx = graph.nodes()[graph.ndata['train_mask'].bool()]
-    local_train_idx = partition_train_nids(train_idx)
-    train_dataloader = SeedGenerator(local_train_idx,
+    # partition train nids, create dataloader
+    train_nids = torch.from_numpy(train_nids_list[rank])
+    train_dataloader = SeedGenerator(train_nids.cuda(),
                                      args.batch_size,
                                      shuffle=True)
 
+    # cache data
     indptr = graph.adj_sparse("csc")[0]
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(indptr)
     indices = graph.adj_sparse("csc")[1]
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(indices)
     if args.bias:
         probs = graph.edata.pop("probs")
+        torch.ops.dgs_ops._CAPI_tensor_pin_memory(probs)
     features = graph.ndata.pop("features")
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(features)
     labels = graph.ndata.pop("labels")
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(labels)
     num_nodes = graph.num_nodes()
-
-    # get feature cahce nids
-    if args.gpu_mem_size is not None:
-        available_mem = int(args.gpu_mem_size * 1024 * 1024 * 1024)
-    else:
-        available_mem = get_available_memory(rank, 3 * 1024 * 1024 * 1024)
-    print("Rank {}, Free GPU memory size: {:.3f} GB".format(
-        rank, available_mem / 1024 / 1024 / 1024))
-
-    start = time.time()
-    local_partition = get_local_subgraph(graph, local_train_idx, len(fan_out))
-    local_nids = local_partition.nodes()
-    out_degrees = local_partition.out_degrees()
-    sorted_local_nids = local_nids[torch.argsort(out_degrees)]
-    feature_size_per_node = features.numel() * features.element_size(
-    ) / num_nodes
-    cached_nids_num = min(int(available_mem / feature_size_per_node),
-                          sorted_local_nids.numel())
-    cached_nids = sorted_local_nids[:cached_nids_num]
-    end = time.time()
-    print("Rank {}, it takes {:.3f} s to determine the cache nids".format(
-        rank, end - start))
-
     del graph
 
-    feature_server = FeatureCacheServer(features, device_id=rank)
-    feature_server.cache_data(cached_nids.cuda(),
-                              cached_nids.numel() >= num_nodes)
-    del local_partition
+    feature_cache_nids = torch.from_numpy(feature_cache_nids_list[rank])
 
+    print("Rank {}, cache features...".format(rank))
+    feature_server = FeatureCacheServer(features, device_id=rank)
+    feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_cache_nids.numel() >= num_nodes)
+
+    print("Rank {}, cache structures...".format(rank))
     if args.bias:
         structure_server = StructureCacheServer(indptr,
                                                 indices,
@@ -97,7 +119,8 @@ def run(rank, world_size, data, args):
         structure_server = StructureCacheServer(indptr,
                                                 indices,
                                                 device_id=rank)
-    structure_server.cache_data(torch.tensor([]))
+    structure_server.cache_data(torch.tensor([]), False)
+    fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
 
     dist.barrier()
 
@@ -150,12 +173,19 @@ def run(rank, world_size, data, args):
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
-                np.mean(sampling_time_log[5:]) * 1000,
-                np.mean(loading_time_log[5:]) * 1000,
-                np.mean(training_time_log[5:]) * 1000,
-                np.mean(iteration_time_log[5:]) * 1000,
+                np.mean(sampling_time_log[3:]) * 1000,
+                np.mean(loading_time_log[3:]) * 1000,
+                np.mean(training_time_log[3:]) * 1000,
+                np.mean(iteration_time_log[3:]) * 1000,
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
+
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(indptr)
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(indices)
+    if args.bias:
+        torch.ops.dgs_ops._CAPI_tensor_unpin_memory(probs)
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(features)
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(labels)
 
 
 if __name__ == '__main__':
@@ -164,7 +194,7 @@ if __name__ == '__main__':
                         default='8',
                         type=int,
                         help='The number GPU participated in the training.')
-    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument("--num-epochs", type=int, default=5)
     parser.add_argument('--root',
                         default='dataset/',
                         help='Path of the dataset.')
@@ -179,13 +209,8 @@ if __name__ == '__main__':
                         help="Sample with bias.")
     parser.add_argument(
         "--dataset",
-        default="ogbn-papers400M",
+        default="ogbn-papers100M",
         choices=["ogbn-products", "ogbn-papers100M", "ogbn-papers400M"])
-    parser.add_argument(
-        '--gpu-mem-size',
-        type=float,
-        default=None,
-        help="free size of gpu memory, unit: GB, support float.")
     args = parser.parse_args()
     print(args)
 
@@ -205,7 +230,12 @@ if __name__ == '__main__':
     if args.bias:
         graph.edata['probs'] = torch.randn((graph.num_edges(), )).abs().float()
 
-    data = graph, num_classes
+    fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
+
+    train_nids_list, feature_cache_nids_list = preprocess(
+        graph, fan_out, n_procs)
+
+    data = graph, num_classes, train_nids_list, feature_cache_nids_list
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)
