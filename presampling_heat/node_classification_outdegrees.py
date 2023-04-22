@@ -18,9 +18,9 @@ torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
 
 
 def print_memory():
-    print("max_memory_allocated: {:.2f} GB, max_memory_reserved {:.2f} GB".format(
-        torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024,
-        torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024))
+    print("max_memory_allocated: {:.2f} GB, max_memory_reserved {:.2f} GB".
+          format(torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024,
+                 torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024))
     print("memory_allocated {:.2f} GB, memory_reserved {:.2f} GB".format(
         torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
         torch.cuda.memory_reserved() / 1024 / 1024 / 1024))
@@ -56,10 +56,11 @@ def run(rank, world_size, data, args):
                                      args.batch_size,
                                      shuffle=True)
 
-    available_mem = get_available_memory(rank, 7 * 1024 * 1024 * 1024)
+    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
-    feature_cached_nids = preprocess_for_cached_nids_out_degrees(graph, available_mem, world_size, rank)
+    feature_cache_nids = preprocess_for_cached_nids_out_degrees(
+        graph, available_mem, world_size, rank)
 
     # pin data
     for key in graph:
@@ -69,17 +70,17 @@ def run(rank, world_size, data, args):
     # cache data
     print("Rank {}, cache features...".format(rank))
     feature_server = FeatureP2PCacheServer(graph["features"])
-    feature_server.cache_data(feature_cached_nids.cuda(),
-                              feature_cached_nids.numel() >= num_nodes)
+    feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
     if args.bias:
         structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                graph["indices"],
-                                                probs=graph["probs"])
+                                                   graph["indices"],
+                                                   probs=graph["probs"])
     else:
         structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                graph["indices"])
+                                                   graph["indices"])
     structure_server.cache_data(torch.tensor([]), False)
 
     dist.barrier()
@@ -111,7 +112,8 @@ def run(rank, world_size, data, args):
 
             loading_start = time.time()
             batch_inputs = feature_server.fetch_data(frontier).cuda()
-            batch_labels = graph["labels"].index_select(0, seeds.cpu()).cuda()
+            batch_labels = torch.ops.dgs_ops._CAPI_index(
+                graph["labels"], seeds)
             torch.cuda.synchronize()
             loading_end = time.time()
 
@@ -188,9 +190,9 @@ if __name__ == '__main__':
 
     # partition train nodes
     train_nids = graph.pop("train_idx")
-    train_nids = torch.cat([torch.randint(
-        0, graph["indptr"].numel() - 1,
-        (graph["indptr"].numel() // 10, )).long(), train_nids]).unique()
+    # train_nids = torch.cat([torch.randint(
+    #     0, graph["indptr"].numel() - 1,
+    #     (graph["indptr"].numel() // 10, )).long(), train_nids]).unique()
 
     train_nids = train_nids[torch.randperm(train_nids.shape[0])]
     num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs
@@ -205,21 +207,10 @@ if __name__ == '__main__':
 
     data = graph, num_classes, train_nids_list
 
-    #graph["labels"] = torch.maximum(
-    #    graph["labels"],
-    #    torch.tensor([num_classes - 1], dtype=graph["labels"].dtype))
-    #graph["labels"] = torch.minimum(
-    #    graph["labels"], torch.tensor([0], dtype=graph["labels"].dtype))
-
     index = ~torch.isnan(graph["labels"])
-    print(index)
     valid_label = graph["labels"][index]
-    print(valid_label)
-
     graph["labels"][:] = 0
     graph["labels"][index] = valid_label
-
-    print(graph["labels"].max(), graph["labels"].min())
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)

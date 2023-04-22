@@ -41,6 +41,58 @@ def preprocess_for_cached_nids_out_degrees(graph, available_mem, devices_num, de
     return cached_nids
 
 
+# def get_node_value(sampling_heat,
+#                    feature_heat,
+#                    sampling_cache_reduce_time,
+#                    feature_cache_reduce_time,
+#                    in_degrees,
+#                    graph_type_size,
+#                    avg_sampling_bytes,
+#                    avg_feature_bytes,
+#                    with_probs=False):
+
+#     sampling_cache_bytes = None
+#     if with_probs:
+#         sampling_cache_bytes = (graph_type_size +
+#                                 in_degrees.int() *
+#                                 (graph_type_size + 4))  # 4 bytes for float
+
+#     else:
+#         sampling_cache_bytes = (graph_type_size +
+#                                 in_degrees.int() *
+#                                 (graph_type_size))
+
+#     feature_cache_bytes = torch.full_like(feature_heat,
+#                                           avg_feature_bytes,
+#                                           dtype=torch.int32)
+
+#     sampling_value = sampling_heat * sampling_cache_reduce_time / avg_sampling_bytes
+#     feature_value = feature_heat * feature_cache_reduce_time / avg_feature_bytes
+
+#     return sampling_cache_bytes, sampling_value, feature_cache_bytes, feature_value
+
+
+# def get_cache_nids(sampling_cache_bytes, sampling_value,
+#                    feature_cache_bytes, feature_value,
+#                    free_capacity_bytes):
+
+#     all_value = torch.cat([sampling_value, feature_value])
+#     sorted_ids = torch.argsort(all_value, descending=True)
+#     cache_bytes = torch.cat([sampling_cache_bytes,
+#                              feature_cache_bytes])[sorted_ids]
+
+#     cache_bytes_prefix_sum = torch.cumsum(cache_bytes, 0)
+#     cached_ids = sorted_ids[cache_bytes_prefix_sum <= free_capacity_bytes]
+
+#     mask = cached_ids < sampling_value.numel()
+
+#     structure_cache_nids = torch.arange(0, sampling_value.numel())[cached_ids[mask]]
+#     feature_cache_nids = torch.arange(0, sampling_value.numel())[cached_ids[~mask] -
+#                                       sampling_value.numel()]
+
+#     return structure_cache_nids, feature_cache_nids
+
+
 def preprocess_for_cached_nids_heat(graph, sampling_heat, feature_heat, bias, available_mem, devices_num, device_id):
     start = time.time()
 
@@ -57,6 +109,9 @@ def preprocess_for_cached_nids_heat(graph, sampling_heat, feature_heat, bias, av
 
     if dist.get_rank() == 0:
 
+        # sampling_heat = sampling_heat.cpu()
+        # feature_heat = feature_heat.cpu()
+
         avg_feature_size = graph["features"].shape[1] * graph[
             "features"].element_size()
         indptr = graph["indptr"]
@@ -72,14 +127,21 @@ def preprocess_for_cached_nids_heat(graph, sampling_heat, feature_heat, bias, av
             avg_structure_size = indptr.element_size() + avg_degree * (
                 indices.element_size())
 
+        # sampling_cache_bytes, sampling_value, feature_cache_bytes, feature_value = get_node_value(
+        #     sampling_heat, feature_heat,
+        #     1, 1, in_degrees, indptr.element_size(), 
+        #     avg_structure_size, avg_feature_size, bias)
         sampling_nids, sampling_cache_bytes, sampling_value, feature_nids, feature_cache_bytes, feature_value = get_node_value(
             sampling_heat, feature_heat,
             1, 1, in_degrees.cuda(), indptr.element_size(), 
             avg_structure_size, avg_feature_size, bias)
 
+        # structure_cache_nids, feature_cache_nids = get_cache_nids(
+        #     sampling_cache_bytes, sampling_value,
+        #     feature_cache_bytes, feature_value, available_mem * devices_num)
         structure_cache_nids, feature_cache_nids = get_cache_nids(
-            sampling_nids, sampling_cache_bytes, sampling_value, feature_nids,
-            feature_cache_bytes, feature_value, available_mem)
+            sampling_nids, sampling_cache_bytes, sampling_value,
+                   feature_nids, feature_cache_bytes, feature_value, available_mem * devices_num)
 
         structure_cache_nids_per_gpu = structure_cache_nids.shape[0] // devices_num
         feature_cache_nids_per_gpu = feature_cache_nids.shape[0] // devices_num

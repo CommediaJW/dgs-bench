@@ -120,7 +120,8 @@ def run(rank, world_size, data, args):
 
             loading_start = time.time()
             batch_inputs = chunk_features._CAPI_index(frontier).cuda()
-            batch_labels = graph["labels"].index_select(0, seeds.cpu()).cuda()
+            batch_labels = torch.ops.dgs_ops._CAPI_index(
+                graph["labels"], seeds)
             torch.cuda.synchronize()
             loading_end = time.time()
 

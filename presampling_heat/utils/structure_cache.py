@@ -25,6 +25,10 @@ class StructureP2PCacheServer:
         self.full_cached = False
         self.no_cache = False
 
+        self.access_times = 0
+        self.local_hit_times = 0
+        self.remote_hit_times = 0
+
     def cache_data(self, cache_nids, full_cached=False):
         self.full_cached = full_cached
 
@@ -95,7 +99,7 @@ class StructureP2PCacheServer:
                     torch.ops.dgs_ops._CAPI_tensor_pin_memory(
                         cache_nids_list[i])
 
-                self.cached_nids_hashed, self.cached_nids_in_gpu_hashed, self.device_idx_hashed = torch.ops.dgs_ops._CAPI_create_p2p_hashmap(
+                self.cached_nids_hashed, self.cached_nids_in_gpu_hashed, self.device_idx_hashed = torch.ops.dgs_ops._CAPI_create_p2p_cache_hashmap(
                     cache_nids_list, all_devices_cached_nids_num,
                     self.device_id)
 
@@ -105,12 +109,9 @@ class StructureP2PCacheServer:
 
             else:
                 self.no_cache = True
-                self.cached_indptr = self.indptr
                 indptr_cached_size = 0
-                self.cached_indices = self.indices
                 indices_cached_size = 0
                 if self.probs is not None:
-                    self.cached_probs = self.probs
                     probs_cached_size = 0
 
         end = time.time()
@@ -134,8 +135,14 @@ class StructureP2PCacheServer:
                       probs_cached_size /
                       (self.probs.element_size() * self.probs.numel())))
 
-    def sample_neighbors(self, seeds_nids, fan_out, replace=False, count=False, sampling_heat=None):
-        seeds = seeds_nids.cuda()
+    def sample_neighbors(self,
+                         seeds_nids,
+                         fan_out,
+                         replace=False,
+                         count=False,
+                         sampling_heat=None,
+                         log_hit_rate=False):
+        seeds = seeds_nids.cuda(self.device_id)
         blocks = []
 
         for num_picks in reversed(fan_out):
@@ -143,7 +150,10 @@ class StructureP2PCacheServer:
             if count:
                 sampling_heat[seeds] += 1
 
-            if self.full_cached or self.no_cache:
+            if self.full_cached:
+                if log_hit_rate:
+                    self.access_times += seeds.numel()
+                    self.local_hit_times += seeds.numel()
                 if self.probs is not None:
                     coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias(
                         seeds, self.cached_indptr, self.cached_indices,
@@ -152,7 +162,26 @@ class StructureP2PCacheServer:
                     coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors(
                         seeds, self.cached_indptr, self.cached_indices,
                         num_picks, replace)
+
+            elif self.no_cache:
+                if log_hit_rate:
+                    self.access_times += seeds.numel()
+                if self.probs is not None:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias(
+                        seeds, self.indptr, self.indices, self.probs,
+                        num_picks, replace)
+                else:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors(
+                        seeds, self.indptr, self.indices, num_picks, replace)
+
             else:
+                if log_hit_rate:
+                    local_seeds_num, remote_seeds_num = torch.ops.dgs_ops._CAPI_count_local_and_remote_p2p_cache_nids(
+                        seeds, self.cached_nids_hashed, self.device_idx_hashed,
+                        self.device_id)
+                    self.access_times += seeds.numel()
+                    self.local_hit_times += local_seeds_num
+                    self.remote_hit_times += remote_seeds_num
                 if self.probs is not None:
                     coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias_with_p2p_caching(
                         seeds, self.cached_indptr, self.indptr,
@@ -171,6 +200,7 @@ class StructureP2PCacheServer:
             frontier, (coo_row,
                        coo_col) = torch.ops.dgs_ops._CAPI_tensor_relabel(
                            [seeds, coo_col], [coo_row, coo_col])
+
             block = dgl.create_block((coo_col, coo_row),
                                      num_src_nodes=frontier.numel(),
                                      num_dst_nodes=seeds.numel())
@@ -181,6 +211,17 @@ class StructureP2PCacheServer:
             seeds = frontier
 
         return frontier, seeds_nids, blocks
+
+    def print_hit_rate(self):
+        if self.access_times > 0:
+            print("GPU {}, structure p2p cache local hit rate = {:.3f}".format(
+                self.device_id, self.local_hit_times / self.access_times))
+            print(
+                "GPU {}, structure p2p cache remote hit rate = {:.3f}".format(
+                    self.device_id, self.remote_hit_times / self.access_times))
+        else:
+            print("GPU {} didn't log any hit information!".format(
+                self.device_id))
 
     def clear_cache(self):
         del self.cached_indptr
@@ -199,3 +240,6 @@ class StructureP2PCacheServer:
         self.device_idx_hashed = None
         self.full_cached = False
         self.no_cache = False
+        self.access_times = 0
+        self.local_hit_times = 0
+        self.remote_hit_times = 0
