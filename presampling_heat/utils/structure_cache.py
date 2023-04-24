@@ -29,7 +29,10 @@ class StructureP2PCacheServer:
         self.local_hit_times = 0
         self.remote_hit_times = 0
 
-    def cache_data(self, cache_nids, full_cached=False):
+    def cache_data(self,
+                   cache_nids,
+                   total_cache_nids_num=None,
+                   full_cached=False):
         self.full_cached = full_cached
 
         start = time.time()
@@ -93,15 +96,15 @@ class StructureP2PCacheServer:
                                        cache_nids_list[self.device_id],
                                        self.process_group)
 
-                all_devices_cached_nids_num = torch.cat(
-                    cache_nids_list).unique().numel()
+                if total_cache_nids_num is None:
+                    total_cache_nids_num = torch.cat(
+                        cache_nids_list).unique().numel()
                 for i in range(self.num_devices):
                     torch.ops.dgs_ops._CAPI_tensor_pin_memory(
                         cache_nids_list[i])
 
                 self.cached_nids_hashed, self.cached_nids_in_gpu_hashed, self.device_idx_hashed = torch.ops.dgs_ops._CAPI_create_p2p_cache_hashmap(
-                    cache_nids_list, all_devices_cached_nids_num,
-                    self.device_id)
+                    cache_nids_list, total_cache_nids_num, self.device_id)
 
                 for i in range(self.num_devices):
                     torch.ops.dgs_ops._CAPI_tensor_unpin_memory(

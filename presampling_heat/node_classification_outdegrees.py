@@ -59,7 +59,7 @@ def run(rank, world_size, data, args):
     available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
-    feature_cache_nids = preprocess_for_cached_nids_out_degrees(
+    feature_cache_nids, feature_total_cache_nids_num = preprocess_for_cached_nids_out_degrees(
         graph, available_mem, world_size, rank)
 
     # pin data
@@ -71,6 +71,7 @@ def run(rank, world_size, data, args):
     print("Rank {}, cache features...".format(rank))
     feature_server = FeatureP2PCacheServer(graph["features"])
     feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_total_cache_nids_num,
                               feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
@@ -190,9 +191,10 @@ if __name__ == '__main__':
 
     # partition train nodes
     train_nids = graph.pop("train_idx")
-    # train_nids = torch.cat([torch.randint(
-    #     0, graph["indptr"].numel() - 1,
-    #     (graph["indptr"].numel() // 10, )).long(), train_nids]).unique()
+    train_nids = torch.cat([
+        torch.randint(0, graph["indptr"].numel() - 1,
+                      (graph["indptr"].numel() // 10, )).long(), train_nids
+    ]).unique()
 
     train_nids = train_nids[torch.randperm(train_nids.shape[0])]
     num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs

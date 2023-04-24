@@ -7,10 +7,8 @@ import torch.distributed as dist
 import time
 import numpy as np
 from utils.models import SAGE
-from GraphCache.cache import FeatureP2PCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
 from GraphCache.dist import create_p2p_communicator
-from preprocess import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
 from utils.load_dataset import load_dataset
 from utils.structure_cache import StructureP2PCacheServer
 
@@ -56,23 +54,9 @@ def run(rank, world_size, data, args):
                                      args.batch_size,
                                      shuffle=True)
 
-    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
-    print("GPU {}, available memory size = {:.3f} GB".format(
-        rank, available_mem / 1024 / 1024 / 1024))
-    feature_cache_nids, feature_total_cache_nids_num = preprocess_for_cached_nids_out_degrees(
-        graph, available_mem, world_size, rank)
-
     # pin data
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
-    num_nodes = graph["indptr"].shape[0] - 1
-
-    # cache data
-    print("Rank {}, cache features...".format(rank))
-    feature_server = FeatureP2PCacheServer(graph["features"])
-    feature_server.cache_data(feature_cache_nids.cuda(),
-                              feature_total_cache_nids_num,
-                              feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
     if args.bias:
@@ -95,13 +79,6 @@ def run(rank, world_size, data, args):
     epoch_iterations_log = []
     epoch_time_log = []
 
-    sampling_heat = torch.zeros((num_nodes, ),
-                                dtype=torch.float32,
-                                device="cuda")
-    feature_heat = torch.zeros((num_nodes, ),
-                               dtype=torch.float32,
-                               device="cuda")
-
     for epoch in range(args.num_epochs):
         model.train()
 
@@ -112,28 +89,19 @@ def run(rank, world_size, data, args):
         for it, seed_nids in enumerate(train_dataloader):
             torch.cuda.synchronize()
             sampling_start = time.time()
-            if epoch < args.presampling_num_epochs:
-                frontier, seeds, blocks = structure_server.sample_neighbors(
-                    seed_nids,
-                    fan_out,
-                    count=True,
-                    sampling_heat=sampling_heat)
-            else:
-                frontier, seeds, blocks = structure_server.sample_neighbors(
-                    seed_nids, fan_out)
+            frontier, seeds, blocks = structure_server.sample_neighbors(
+                seed_nids, fan_out)
             blocks = [block.to(rank) for block in blocks]
             torch.cuda.synchronize()
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = feature_server.fetch_data(frontier).cuda()
-            batch_labels = torch.ops.dgs_ops._CAPI_index(
-                graph["labels"], seeds)
+            batch_inputs = torch.index_select(graph["features"], 0,
+                                              frontier.cpu()).cuda()
+            batch_labels = torch.index_select(graph["labels"], 0,
+                                              seeds.cpu()).cuda()
             torch.cuda.synchronize()
             loading_end = time.time()
-
-            if epoch < args.presampling_num_epochs:
-                feature_heat[frontier] += 1
 
             training_start = time.time()
             batch_pred = model(blocks, batch_inputs)
@@ -153,25 +121,6 @@ def run(rank, world_size, data, args):
         epoch_end = time.time()
         epoch_iterations_log.append(it)
         epoch_time_log.append(epoch_end - epoch_start)
-
-        if epoch == args.presampling_num_epochs - 1:
-            sampling_heat /= args.presampling_num_epochs
-            feature_heat /= args.presampling_num_epochs
-            print("Rank {}, update cache".format(rank))
-            structure_server.clear_cache()
-            feature_server.clear_cache()
-            structure_cache_nids, structure_total_cache_nids_num, feature_cache_nids, feature_total_cache_nids_num = preprocess_for_cached_nids_heat(
-                graph, sampling_heat, feature_heat, args.bias, available_mem,
-                world_size, rank)
-            del sampling_heat, feature_heat
-            feature_server.cache_data(feature_cache_nids,
-                                      feature_total_cache_nids_num,
-                                      feature_cache_nids.numel() >= num_nodes)
-            structure_server.cache_data(
-                structure_cache_nids, structure_total_cache_nids_num,
-                structure_cache_nids.numel() >= num_nodes)
-
-            dist.barrier()
 
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
@@ -209,7 +158,6 @@ if __name__ == '__main__':
     parser.add_argument("--dataset",
                         default="ogbn-papers100M",
                         choices=["ogbn-products", "ogbn-papers100M"])
-    parser.add_argument("--presampling-num-epochs", type=int, default=1)
     args = parser.parse_args()
     torch.manual_seed(1)
 

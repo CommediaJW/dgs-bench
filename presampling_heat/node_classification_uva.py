@@ -7,7 +7,7 @@ import torch.distributed as dist
 import time
 import numpy as np
 from utils.models import SAGE
-from GraphCache.cache import FeatureP2PCacheServer, get_available_memory
+from GraphCache.cache import FeatureP2PCacheServer
 from GraphCache.dataloading import SeedGenerator
 from GraphCache.dist import create_p2p_communicator
 from utils.load_dataset import load_dataset
@@ -56,8 +56,8 @@ def run(rank, world_size, data, args):
                                      shuffle=True)
 
     # pin data
-    for key in graph:
-        torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
+    # for key in graph:
+    #     torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
 
     # cache data
     print("Rank {}, cache features...".format(rank))
@@ -137,8 +137,8 @@ def run(rank, world_size, data, args):
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
 
-    for key in graph:
-        torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
+    # for key in graph:
+    #     torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
 
 
 if __name__ == '__main__':
@@ -181,9 +181,10 @@ if __name__ == '__main__':
 
     # partition train nodes
     train_nids = graph.pop("train_idx")
-    # train_nids = torch.cat([torch.randint(
-    #     0, graph["indptr"].numel() - 1,
-    #     (graph["indptr"].numel() // 10, )).long(), train_nids]).unique()
+    train_nids = torch.cat([
+        torch.randint(0, graph["indptr"].numel() - 1,
+                      (graph["indptr"].numel() // 10, )).long(), train_nids
+    ]).unique()
 
     train_nids = train_nids[torch.randperm(train_nids.shape[0])]
     num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs

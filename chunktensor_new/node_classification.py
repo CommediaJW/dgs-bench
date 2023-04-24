@@ -52,7 +52,7 @@ def run(rank, world_size, data, args):
                                      args.batch_size,
                                      shuffle=True)
 
-    available_mem = get_available_memory(rank, 7 * 1024 * 1024 * 1024)
+    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
 
@@ -88,6 +88,8 @@ def run(rank, world_size, data, args):
         max(available_mem - torch.ops.dgs_ops._CAPI_get_current_allocated(),
             0), args.graph_cache_rate)
 
+    chunk_labels = create_chunktensor(graph["labels"], world_size, 0, 0)
+
     if args.bias:
         sampler = ChunkTensorSampler(fan_out,
                                      chunk_indptr,
@@ -109,6 +111,9 @@ def run(rank, world_size, data, args):
     for epoch in range(args.num_epochs):
         model.train()
 
+        if rank == 0:
+            print("Epoch {}".format(epoch))
+
         epoch_start = time.time()
         for it, seed_nids in enumerate(train_dataloader):
             torch.cuda.synchronize()
@@ -120,8 +125,7 @@ def run(rank, world_size, data, args):
 
             loading_start = time.time()
             batch_inputs = chunk_features._CAPI_index(frontier).cuda()
-            batch_labels = torch.ops.dgs_ops._CAPI_index(
-                graph["labels"], seeds)
+            batch_labels = chunk_labels._CAPI_index(seeds).cuda().squeeze(1)
             torch.cuda.synchronize()
             loading_end = time.time()
 
@@ -242,9 +246,6 @@ if __name__ == '__main__':
     graph["labels"][index] = valid_label
 
     print(graph["labels"].max(), graph["labels"].min())
-
-    print(graph["features"].shape)
-    print(graph["features"].stride())
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)
