@@ -120,13 +120,14 @@ def run(rank, world_size, data, args):
                     sampling_heat=sampling_heat)
             else:
                 frontier, seeds, blocks = structure_server.sample_neighbors(
-                    seed_nids, fan_out)
+                    seed_nids, fan_out, log_hit_rate=args.log_hit_rate)
             blocks = [block.to(rank) for block in blocks]
             torch.cuda.synchronize()
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = feature_server.fetch_data(frontier).cuda()
+            batch_inputs = feature_server.fetch_data(
+                frontier, log_hit_rate=args.log_hit_rate).cuda()
             batch_labels = torch.ops.dgs_ops._CAPI_index(
                 graph["labels"], seeds)
             torch.cuda.synchronize()
@@ -183,6 +184,10 @@ def run(rank, world_size, data, args):
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
 
+    if args.log_hit_rate:
+        feature_server.print_hit_rate()
+        structure_server.print_hit_rate()
+
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
 
@@ -210,6 +215,7 @@ if __name__ == '__main__':
                         default="ogbn-papers100M",
                         choices=["ogbn-products", "ogbn-papers100M"])
     parser.add_argument("--presampling-num-epochs", type=int, default=1)
+    parser.add_argument('--log-hit-rate', action='store_true', default=False)
     args = parser.parse_args()
     torch.manual_seed(1)
 

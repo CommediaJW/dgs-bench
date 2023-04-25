@@ -56,8 +56,8 @@ def run(rank, world_size, data, args):
                                      shuffle=True)
 
     # pin data
-    # for key in graph:
-    #     torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
+    for key in graph:
+        torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
 
     # cache data
     print("Rank {}, cache features...".format(rank))
@@ -137,8 +137,8 @@ def run(rank, world_size, data, args):
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
 
-    # for key in graph:
-    #     torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
+    for key in graph:
+        torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
 
 
 if __name__ == '__main__':
