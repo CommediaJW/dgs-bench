@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
+import torchmetrics.functional as MF
 import time
 import numpy as np
 from utils.models import SAGE
@@ -24,6 +25,30 @@ def print_memory():
     print("memory_allocated {:.2f} GB, memory_reserved {:.2f} GB".format(
         torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
         torch.cuda.memory_reserved() / 1024 / 1024 / 1024))
+
+
+def evaluate(model, graph, valid_dataloader, feature_server, structure_server,
+             fan_out, num_classes, rank):
+    model.eval()
+    ys = []
+    y_hats = []
+    for it, seed_nids in enumerate(valid_dataloader):
+        with torch.no_grad():
+            frontier, seeds, blocks = structure_server.sample_neighbors(
+                seed_nids, fan_out)
+            blocks = [block.to(rank) for block in blocks]
+            batch_inputs = feature_server.fetch_data(frontier).cuda()
+            batch_labels = torch.ops.dgs_ops._CAPI_index(
+                graph["labels"], seeds)
+            batch_pred = model(blocks, batch_inputs)
+            ys.append(batch_labels)
+            y_hats.append(batch_pred)
+    return MF.accuracy(
+        torch.cat(y_hats),
+        torch.cat(ys),
+        task="multiclass",
+        num_classes=num_classes,
+    )
 
 
 def run(rank, world_size, data, args):
@@ -55,6 +80,12 @@ def run(rank, world_size, data, args):
     train_dataloader = SeedGenerator(train_nids.cuda(),
                                      args.batch_size,
                                      shuffle=True)
+
+    # valid
+    if args.valid and rank == 0:
+        valid_dataloader = SeedGenerator(graph["valid_idx"].cuda(),
+                                         args.batch_size,
+                                         shuffle=True)
 
     available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
@@ -104,10 +135,6 @@ def run(rank, world_size, data, args):
 
     for epoch in range(args.num_epochs):
         model.train()
-
-        if rank == 0:
-            print("Epoch {}".format(epoch))
-
         epoch_start = time.time()
         for it, seed_nids in enumerate(train_dataloader):
             torch.cuda.synchronize()
@@ -155,6 +182,12 @@ def run(rank, world_size, data, args):
         epoch_iterations_log.append(it)
         epoch_time_log.append(epoch_end - epoch_start)
 
+        if args.valid and rank == 0:
+            acc = evaluate(model, graph, valid_dataloader, feature_server,
+                           structure_server, fan_out, num_classes, rank)
+            print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
+        dist.barrier()
+
         if epoch == args.presampling_num_epochs - 1:
             sampling_heat /= args.presampling_num_epochs
             feature_heat /= args.presampling_num_epochs
@@ -174,6 +207,7 @@ def run(rank, world_size, data, args):
 
             dist.barrier()
 
+    dist.barrier()
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
@@ -216,6 +250,7 @@ if __name__ == '__main__':
                         choices=["ogbn-products", "ogbn-papers100M"])
     parser.add_argument("--presampling-num-epochs", type=int, default=1)
     parser.add_argument('--log-hit-rate', action='store_true', default=False)
+    parser.add_argument('--valid', action='store_true', default=False)
     args = parser.parse_args()
     torch.manual_seed(1)
 
@@ -234,10 +269,10 @@ if __name__ == '__main__':
 
     # partition train nodes
     train_nids = graph.pop("train_idx")
-    train_nids = torch.cat([
-        torch.randint(0, graph["indptr"].numel() - 1,
-                      (graph["indptr"].numel() // 10, )).long(), train_nids
-    ]).unique()
+    # train_nids = torch.cat([
+    #     torch.randint(0, graph["indptr"].numel() - 1,
+    #                   (graph["indptr"].numel() // 10, )).long(), train_nids
+    # ]).unique()
 
     train_nids = train_nids[torch.randperm(train_nids.shape[0])]
     num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs
@@ -251,11 +286,6 @@ if __name__ == '__main__':
         train_nids_list.append(local_train_nids.numpy())
 
     data = graph, num_classes, train_nids_list
-
-    index = ~torch.isnan(graph["labels"])
-    valid_label = graph["labels"][index]
-    graph["labels"][:] = 0
-    graph["labels"][index] = valid_label
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)

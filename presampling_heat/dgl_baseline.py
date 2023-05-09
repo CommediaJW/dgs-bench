@@ -6,14 +6,46 @@ import torch.optim as optim
 import torch.distributed as dist
 import torchmetrics.functional as MF
 import time
+import dgl
 import numpy as np
 from utils.models import SAGE
-from GraphCache.dataloading import SeedGenerator
-from GraphCache.dist import create_p2p_communicator
-from utils.load_dataset import load_dataset
-from utils.structure_cache import StructureP2PCacheServer
 
 torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
+
+
+def load_ogb(name, root="dataset"):
+    from ogb.nodeproppred import DglNodePropPredDataset
+
+    print('load', name)
+    data = DglNodePropPredDataset(name=name, root=root)
+    print('finish loading', name)
+    splitted_idx = data.get_idx_split()
+    graph, labels = data[0]
+    labels = labels[:, 0]
+
+    graph.ndata['features'] = graph.ndata.pop('feat')
+    graph.ndata['labels'] = labels
+
+    if name == "ogbn-papers100M":
+        num_labels = 172
+    else:
+        num_labels = len(
+            torch.unique(labels[torch.logical_not(torch.isnan(labels))]))
+
+    # Find the node IDs in the training, validation, and test set.
+    train_nid, val_nid, test_nid = splitted_idx['train'], splitted_idx[
+        'valid'], splitted_idx['test']
+    train_mask = torch.zeros((graph.number_of_nodes(), ), dtype=torch.bool)
+    train_mask[train_nid] = True
+    val_mask = torch.zeros((graph.number_of_nodes(), ), dtype=torch.bool)
+    val_mask[val_nid] = True
+    test_mask = torch.zeros((graph.number_of_nodes(), ), dtype=torch.bool)
+    test_mask[test_nid] = True
+    graph.ndata['train_mask'] = train_mask
+    graph.ndata['val_mask'] = val_mask
+    graph.ndata['test_mask'] = test_mask
+    print('finish constructing', name)
+    return graph, num_labels
 
 
 def print_memory():
@@ -25,20 +57,14 @@ def print_memory():
         torch.cuda.memory_reserved() / 1024 / 1024 / 1024))
 
 
-def evaluate(model, graph, valid_dataloader, structure_server, fan_out,
-             num_classes, rank):
+def evaluate(model, valid_dataloader, num_classes):
     model.eval()
     ys = []
     y_hats = []
-    for it, seed_nids in enumerate(valid_dataloader):
+    for it, (input_nodes, output_nodes, blocks) in enumerate(valid_dataloader):
         with torch.no_grad():
-            frontier, seeds, blocks = structure_server.sample_neighbors(
-                seed_nids, fan_out)
-            blocks = [block.to(rank) for block in blocks]
-            batch_inputs = torch.index_select(graph["features"], 0,
-                                              frontier.cpu()).cuda()
-            batch_labels = torch.index_select(graph["labels"], 0,
-                                              seeds.cpu()).cuda()
+            batch_inputs = blocks[0].srcdata['features']
+            batch_labels = blocks[-1].dstdata['labels']
             batch_pred = model(blocks, batch_inputs)
             ys.append(batch_labels)
             y_hats.append(batch_pred)
@@ -51,54 +77,62 @@ def evaluate(model, graph, valid_dataloader, structure_server, fan_out,
 
 
 def run(rank, world_size, data, args):
-    graph, num_classes, train_nids_list = data
+    graph, num_classes = data
 
     torch.cuda.set_device(rank)
     dist.init_process_group('nccl',
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
-    create_p2p_communicator(world_size, rank)
 
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
-    train_nids = torch.from_numpy(train_nids_list[rank])
+    train_nids = torch.nonzero(graph.ndata['train_mask']).squeeze(1).cuda()
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    print_memory()
-
+    if rank == 0:
+        print("Create model...")
     # create model
-    model = SAGE(graph["features"].shape[1], 256, num_classes)
+    model = SAGE(graph.ndata["features"].shape[1], 256, num_classes)
     model = model.cuda()
     model = nn.parallel.DistributedDataParallel(model,
                                                 device_ids=[rank],
                                                 output_device=rank)
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 
+    if rank == 0:
+        print("Create sampler...")
+    # create sampler
+    if args.bias:
+        # bias sampling
+        sampler = dgl.dataloading.NeighborSampler(fan_out, prob='probs')
+    else:
+        # uniform sampling
+        sampler = dgl.dataloading.NeighborSampler(fan_out)
+
+    if rank == 0:
+        print("Create dataloader...")
     # create dataloader
-    train_dataloader = SeedGenerator(train_nids.cuda(),
-                                     args.batch_size,
-                                     shuffle=True)
+    train_dataloader = dgl.dataloading.DataLoader(graph,
+                                                  train_nids,
+                                                  sampler,
+                                                  device='cuda',
+                                                  batch_size=args.batch_size,
+                                                  shuffle=True,
+                                                  num_workers=0,
+                                                  use_ddp=True,
+                                                  use_uva=True)
 
     # valid
     if args.valid and rank == 0:
-        valid_dataloader = SeedGenerator(graph["valid_idx"].cuda(),
-                                         args.batch_size,
-                                         shuffle=True)
-
-    # pin data
-    for key in graph:
-        torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
-
-    print("Rank {}, cache structures...".format(rank))
-    if args.bias:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"],
-                                                   probs=graph["probs"])
-    else:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"])
-    structure_server.cache_data(torch.tensor([]), False)
+        valid_nids = torch.nonzero(graph.ndata['val_mask']).squeeze(1).cuda()
+        valid_dataloader = dgl.dataloading.DataLoader(
+            graph,
+            valid_nids,
+            sampler,
+            device='cuda',
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            use_uva=True)
 
     dist.barrier()
 
@@ -114,20 +148,15 @@ def run(rank, world_size, data, args):
     for epoch in range(args.num_epochs):
         model.train()
         epoch_start = time.time()
-        for it, seed_nids in enumerate(train_dataloader):
-            torch.cuda.synchronize()
-            sampling_start = time.time()
-            frontier, seeds, blocks = structure_server.sample_neighbors(
-                seed_nids, fan_out)
-            blocks = [block.to(rank) for block in blocks]
+        sampling_start = time.time()
+        for it, (input_nodes, output_nodes,
+                 blocks) in enumerate(train_dataloader):
             torch.cuda.synchronize()
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = torch.index_select(graph["features"], 0,
-                                              frontier.cpu()).cuda()
-            batch_labels = torch.index_select(graph["labels"], 0,
-                                              seeds.cpu()).cuda()
+            batch_inputs = blocks[0].srcdata['features']
+            batch_labels = blocks[-1].dstdata['labels']
             torch.cuda.synchronize()
             loading_end = time.time()
 
@@ -145,14 +174,15 @@ def run(rank, world_size, data, args):
             training_time_log.append(training_end - training_start)
             iteration_time_log.append(training_end - sampling_start)
 
+            sampling_start = time.time()
+
         torch.cuda.synchronize()
         epoch_end = time.time()
         epoch_iterations_log.append(it)
         epoch_time_log.append(epoch_end - epoch_start)
 
         if args.valid and rank == 0:
-            acc = evaluate(model, graph, valid_dataloader, structure_server,
-                           fan_out, num_classes, rank)
+            acc = evaluate(model, valid_dataloader, num_classes)
             print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
         dist.barrier()
 
@@ -165,9 +195,6 @@ def run(rank, world_size, data, args):
                 np.mean(iteration_time_log[3:]) * 1000,
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
-
-    for key in graph:
-        torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
 
 
 if __name__ == '__main__':
@@ -196,38 +223,25 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.manual_seed(1)
 
-    if args.dataset == "ogbn-products":
-        graph, num_classes = load_dataset(args.root, "ogbn-products")
-    elif args.dataset == "ogbn-papers100M":
-        graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
-
     n_procs = min(args.num_gpu, torch.cuda.device_count())
     args.num_gpu = n_procs
     print(args)
 
+    if args.dataset == "ogbn-products":
+        graph, num_classes = load_ogb("ogbn-products", root=args.root)
+    elif args.dataset == "ogbn-papers100M":
+        graph, num_classes = load_ogb("ogbn-papers100M", root=args.root)
+    graph = graph.formats('csc')
+    graph.create_formats_()
+    graph.edata.clear()
+
+    print("Create CSC formats...")
+    eid = graph.adj_sparse('csc')[2]
     if args.bias:
-        graph["probs"] = torch.randn(
-            (graph["indices"].shape[0], )).abs().float()
+        probs = torch.randn((graph.num_edges(), )).abs().float()
+    graph.edata["probs"] = probs[torch.argsort(eid)]
 
-    # partition train nodes
-    train_nids = graph.pop("train_idx")
-    # train_nids = torch.cat([
-    #     torch.randint(0, graph["indptr"].numel() - 1,
-    #                   (graph["indptr"].numel() // 10, )).long(), train_nids
-    # ]).unique()
-
-    train_nids = train_nids[torch.randperm(train_nids.shape[0])]
-    num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs
-    print("#train nodes {} | #train nodes per gpu {}".format(
-        train_nids.shape[0], num_train_nids_per_gpu))
-    train_nids_list = []
-    for device in range(n_procs):
-        local_train_nids = train_nids[device *
-                                      num_train_nids_per_gpu:(device + 1) *
-                                      num_train_nids_per_gpu]
-        train_nids_list.append(local_train_nids.numpy())
-
-    data = graph, num_classes, train_nids_list
+    data = graph, num_classes
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)

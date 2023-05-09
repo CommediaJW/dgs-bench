@@ -12,6 +12,7 @@ def load_dataset(path, dataset_name, with_feature=True):
     indptr = torch.load(os.path.join(path, "indptr.pt"))
     indices = torch.load(os.path.join(path, "indices.pt"))
     train_idx = torch.load(os.path.join(path, "train_idx.pt"))
+    valid_idx = torch.load(os.path.join(path, "valid_idx.pt"))
     out_degrees = torch.load(os.path.join(path, "out_degrees.pt"))
 
     graph_tensors = {
@@ -19,12 +20,13 @@ def load_dataset(path, dataset_name, with_feature=True):
         "indptr": indptr,
         "indices": indices,
         "train_idx": train_idx,
+        "valid_idx": valid_idx,
         "out_degrees": out_degrees
     }
 
     if with_feature:
         features = torch.load(os.path.join(path, "features.pt"))
-        graph_tensors["features"]  = features
+        graph_tensors["features"] = features
         graph_tensors["features"] = features
     print("finish loading {}...".format(dataset_name))
 
