@@ -89,7 +89,7 @@ def run(rank, world_size, data, args):
     train_nids = torch.nonzero(graph.ndata['train_mask']).squeeze(1).cuda()
 
     if rank == 0:
-        print("Create model...")
+        print("create model...")
     # create model
     model = SAGE(graph.ndata["features"].shape[1], 256, num_classes)
     model = model.cuda()
@@ -99,7 +99,7 @@ def run(rank, world_size, data, args):
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 
     if rank == 0:
-        print("Create sampler...")
+        print("create sampler...")
     # create sampler
     if args.bias:
         # bias sampling
@@ -109,7 +109,7 @@ def run(rank, world_size, data, args):
         sampler = dgl.dataloading.NeighborSampler(fan_out)
 
     if rank == 0:
-        print("Create dataloader...")
+        print("create dataloader...")
     # create dataloader
     train_dataloader = dgl.dataloading.DataLoader(graph,
                                                   train_nids,
@@ -235,11 +235,11 @@ if __name__ == '__main__':
     graph.create_formats_()
     graph.edata.clear()
 
-    print("Create CSC formats...")
+    print("create CSC formats...")
     eid = graph.adj_sparse('csc')[2]
     if args.bias:
         probs = torch.randn((graph.num_edges(), )).abs().float()
-    graph.edata["probs"] = probs[torch.argsort(eid)]
+        graph.edata["probs"] = probs[torch.argsort(eid)]
 
     data = graph, num_classes
 

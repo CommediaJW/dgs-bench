@@ -11,7 +11,7 @@ from utils.models import SAGE
 from GraphCache.cache import FeatureP2PCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
 from GraphCache.dist import create_p2p_communicator
-from preprocess import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
+from preprocess_p2p import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
 from utils.load_dataset import load_dataset
 from utils.structure_cache import StructureP2PCacheServer
 
@@ -254,14 +254,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.manual_seed(1)
 
+    n_procs = min(args.num_gpu, torch.cuda.device_count())
+    args.num_gpu = n_procs
+    print(args)
+
     if args.dataset == "ogbn-products":
         graph, num_classes = load_dataset(args.root, "ogbn-products")
     elif args.dataset == "ogbn-papers100M":
         graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
-
-    n_procs = min(args.num_gpu, torch.cuda.device_count())
-    args.num_gpu = n_procs
-    print(args)
 
     if args.bias:
         graph["probs"] = torch.randn(

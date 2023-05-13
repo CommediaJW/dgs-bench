@@ -8,12 +8,11 @@ import torchmetrics.functional as MF
 import time
 import numpy as np
 from utils.models import SAGE
-from GraphCache.cache import FeatureP2PCacheServer, get_available_memory
+from GraphCache.cache import FeatureCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
-from GraphCache.dist import create_p2p_communicator
-from preprocess import preprocess_for_cached_nids_out_degrees
+from preprocess import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
 from utils.load_dataset import load_dataset
-from utils.structure_cache import StructureP2PCacheServer
+from utils.structure_cache import StructureCacheServer
 
 torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
 
@@ -59,7 +58,6 @@ def run(rank, world_size, data, args):
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
-    create_p2p_communicator(world_size, rank)
 
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
     train_nids = torch.from_numpy(train_nids_list[rank])
@@ -87,11 +85,11 @@ def run(rank, world_size, data, args):
                                          args.batch_size,
                                          shuffle=True)
 
-    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
+    available_mem = get_available_memory(rank, 4.5 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
-    feature_cache_nids, feature_total_cache_nids_num = preprocess_for_cached_nids_out_degrees(
-        graph, available_mem, world_size, rank)
+    feature_cache_nids = preprocess_for_cached_nids_out_degrees(
+        graph, available_mem, rank)
 
     # pin data
     for key in graph:
@@ -100,19 +98,20 @@ def run(rank, world_size, data, args):
 
     # cache data
     print("Rank {}, cache features...".format(rank))
-    feature_server = FeatureP2PCacheServer(graph["features"])
+    feature_server = FeatureCacheServer(graph["features"], device_id=rank)
     feature_server.cache_data(feature_cache_nids.cuda(),
-                              feature_total_cache_nids_num,
                               feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
     if args.bias:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"],
-                                                   probs=graph["probs"])
+        structure_server = StructureCacheServer(graph["indptr"],
+                                                graph["indices"],
+                                                probs=graph["probs"],
+                                                device_id=rank)
     else:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"])
+        structure_server = StructureCacheServer(graph["indptr"],
+                                                graph["indices"],
+                                                device_id=rank)
     structure_server.cache_data(torch.tensor([]), False)
 
     dist.barrier()
@@ -171,6 +170,7 @@ def run(rank, world_size, data, args):
             print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
         dist.barrier()
 
+    dist.barrier()
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
@@ -211,19 +211,20 @@ if __name__ == '__main__':
     parser.add_argument("--dataset",
                         default="ogbn-papers100M",
                         choices=["ogbn-products", "ogbn-papers100M"])
+    parser.add_argument("--presampling-num-epochs", type=int, default=1)
     parser.add_argument('--log-hit-rate', action='store_true', default=False)
     parser.add_argument('--valid', action='store_true', default=False)
     args = parser.parse_args()
     torch.manual_seed(1)
 
+    n_procs = min(args.num_gpu, torch.cuda.device_count())
+    args.num_gpu = n_procs
+    print(args)
+
     if args.dataset == "ogbn-products":
         graph, num_classes = load_dataset(args.root, "ogbn-products")
     elif args.dataset == "ogbn-papers100M":
         graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
-
-    n_procs = min(args.num_gpu, torch.cuda.device_count())
-    args.num_gpu = n_procs
-    print(args)
 
     if args.bias:
         graph["probs"] = torch.randn(

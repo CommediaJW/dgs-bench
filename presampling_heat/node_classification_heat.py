@@ -8,10 +8,11 @@ import torchmetrics.functional as MF
 import time
 import numpy as np
 from utils.models import SAGE
+from GraphCache.cache import FeatureCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
-from GraphCache.dist import create_p2p_communicator
+from preprocess import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
 from utils.load_dataset import load_dataset
-from utils.structure_cache import StructureP2PCacheServer
+from utils.structure_cache import StructureCacheServer
 
 torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
 
@@ -25,8 +26,8 @@ def print_memory():
         torch.cuda.memory_reserved() / 1024 / 1024 / 1024))
 
 
-def evaluate(model, graph, valid_dataloader, structure_server, fan_out,
-             num_classes, rank):
+def evaluate(model, graph, valid_dataloader, feature_server, structure_server,
+             fan_out, num_classes, rank):
     model.eval()
     ys = []
     y_hats = []
@@ -35,10 +36,9 @@ def evaluate(model, graph, valid_dataloader, structure_server, fan_out,
             frontier, seeds, blocks = structure_server.sample_neighbors(
                 seed_nids, fan_out)
             blocks = [block.to(rank) for block in blocks]
-            batch_inputs = torch.index_select(graph["features"], 0,
-                                              frontier.cpu()).cuda()
-            batch_labels = torch.index_select(graph["labels"], 0,
-                                              seeds.cpu()).cuda()
+            batch_inputs = feature_server.fetch_data(frontier).cuda()
+            batch_labels = torch.ops.dgs_ops._CAPI_index(
+                graph["labels"], seeds)
             batch_pred = model(blocks, batch_inputs)
             ys.append(batch_labels)
             y_hats.append(batch_pred)
@@ -58,7 +58,6 @@ def run(rank, world_size, data, args):
                             'tcp://127.0.0.1:12347',
                             world_size=world_size,
                             rank=rank)
-    create_p2p_communicator(world_size, rank)
 
     fan_out = [int(fanout) for fanout in args.fan_out.split(',')]
     train_nids = torch.from_numpy(train_nids_list[rank])
@@ -86,18 +85,33 @@ def run(rank, world_size, data, args):
                                          args.batch_size,
                                          shuffle=True)
 
+    available_mem = get_available_memory(rank, 4.5 * 1024 * 1024 * 1024)
+    print("GPU {}, available memory size = {:.3f} GB".format(
+        rank, available_mem / 1024 / 1024 / 1024))
+    feature_cache_nids = preprocess_for_cached_nids_out_degrees(
+        graph, available_mem, rank)
+
     # pin data
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
+    num_nodes = graph["indptr"].shape[0] - 1
+
+    # cache data
+    print("Rank {}, cache features...".format(rank))
+    feature_server = FeatureCacheServer(graph["features"], device_id=rank)
+    feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
     if args.bias:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"],
-                                                   probs=graph["probs"])
+        structure_server = StructureCacheServer(graph["indptr"],
+                                                graph["indices"],
+                                                probs=graph["probs"],
+                                                device_id=rank)
     else:
-        structure_server = StructureP2PCacheServer(graph["indptr"],
-                                                   graph["indices"])
+        structure_server = StructureCacheServer(graph["indptr"],
+                                                graph["indices"],
+                                                device_id=rank)
     structure_server.cache_data(torch.tensor([]), False)
 
     dist.barrier()
@@ -111,25 +125,42 @@ def run(rank, world_size, data, args):
     epoch_iterations_log = []
     epoch_time_log = []
 
+    sampling_heat = torch.zeros((num_nodes, ),
+                                dtype=torch.float32,
+                                device="cuda")
+    feature_heat = torch.zeros((num_nodes, ),
+                               dtype=torch.float32,
+                               device="cuda")
+
     for epoch in range(args.num_epochs):
         model.train()
         epoch_start = time.time()
         for it, seed_nids in enumerate(train_dataloader):
             torch.cuda.synchronize()
             sampling_start = time.time()
-            frontier, seeds, blocks = structure_server.sample_neighbors(
-                seed_nids, fan_out)
+            if epoch < args.presampling_num_epochs:
+                frontier, seeds, blocks = structure_server.sample_neighbors(
+                    seed_nids,
+                    fan_out,
+                    count=True,
+                    sampling_heat=sampling_heat)
+            else:
+                frontier, seeds, blocks = structure_server.sample_neighbors(
+                    seed_nids, fan_out, log_hit_rate=args.log_hit_rate)
             blocks = [block.to(rank) for block in blocks]
             torch.cuda.synchronize()
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = torch.index_select(graph["features"], 0,
-                                              frontier.cpu()).cuda()
-            batch_labels = torch.index_select(graph["labels"], 0,
-                                              seeds.cpu()).cuda()
+            batch_inputs = feature_server.fetch_data(
+                frontier, log_hit_rate=args.log_hit_rate).cuda()
+            batch_labels = torch.ops.dgs_ops._CAPI_index(
+                graph["labels"], seeds)
             torch.cuda.synchronize()
             loading_end = time.time()
+
+            if epoch < args.presampling_num_epochs:
+                feature_heat[frontier] += 1
 
             training_start = time.time()
             batch_pred = model(blocks, batch_inputs)
@@ -151,11 +182,30 @@ def run(rank, world_size, data, args):
         epoch_time_log.append(epoch_end - epoch_start)
 
         if args.valid and rank == 0:
-            acc = evaluate(model, graph, valid_dataloader, structure_server,
-                           fan_out, num_classes, rank)
+            acc = evaluate(model, graph, valid_dataloader, feature_server,
+                           structure_server, fan_out, num_classes, rank)
             print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
         dist.barrier()
 
+        if epoch == args.presampling_num_epochs - 1:
+            sampling_heat /= args.presampling_num_epochs
+            feature_heat /= args.presampling_num_epochs
+            print("Rank {}, update cache".format(rank))
+            structure_server.clear_cache()
+            feature_server.clear_cache()
+            structure_cache_nids, feature_cache_nids = preprocess_for_cached_nids_heat(
+                graph, sampling_heat, feature_heat, args.bias, available_mem,
+                rank)
+            del sampling_heat, feature_heat
+            feature_server.cache_data(feature_cache_nids,
+                                      feature_cache_nids.numel() >= num_nodes)
+            structure_server.cache_data(
+                structure_cache_nids,
+                structure_cache_nids.numel() >= num_nodes)
+
+            dist.barrier()
+
+    dist.barrier()
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
@@ -165,6 +215,10 @@ def run(rank, world_size, data, args):
                 np.mean(iteration_time_log[3:]) * 1000,
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
+
+    if args.log_hit_rate:
+        feature_server.print_hit_rate()
+        structure_server.print_hit_rate()
 
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
@@ -192,18 +246,20 @@ if __name__ == '__main__':
     parser.add_argument("--dataset",
                         default="ogbn-papers100M",
                         choices=["ogbn-products", "ogbn-papers100M"])
+    parser.add_argument("--presampling-num-epochs", type=int, default=1)
+    parser.add_argument('--log-hit-rate', action='store_true', default=False)
     parser.add_argument('--valid', action='store_true', default=False)
     args = parser.parse_args()
     torch.manual_seed(1)
+
+    n_procs = min(args.num_gpu, torch.cuda.device_count())
+    args.num_gpu = n_procs
+    print(args)
 
     if args.dataset == "ogbn-products":
         graph, num_classes = load_dataset(args.root, "ogbn-products")
     elif args.dataset == "ogbn-papers100M":
         graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
-
-    n_procs = min(args.num_gpu, torch.cuda.device_count())
-    args.num_gpu = n_procs
-    print(args)
 
     if args.bias:
         graph["probs"] = torch.randn(

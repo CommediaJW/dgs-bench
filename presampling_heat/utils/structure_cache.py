@@ -4,6 +4,202 @@ import time
 import dgl
 
 
+class StructureCacheServer:
+
+    def __init__(self, indptr, indices, probs=None, device_id=0):
+        self.indptr = indptr
+        self.indices = indices
+        self.probs = probs
+
+        self.cached_indptr = None
+        self.cached_indices = None
+        self.cached_probs = None
+
+        self.device_id = device_id
+
+        self.cached_nids_hashed = None
+        self.cached_nids_in_gpu_hashed = None
+
+        self.full_cached = False
+        self.no_cache = False
+
+        self.access_times = 0
+        self.hit_times = 0
+
+    def cache_data(self, cache_nids, full_cached=False):
+        self.full_cached = full_cached
+
+        start = time.time()
+
+        if self.full_cached:
+
+            self.cached_indptr = self.indptr.cuda(self.device_id)
+            self.cached_indices = self.indices.cuda(self.device_id)
+            if self.probs is not None:
+                self.cached_probs = self.probs.cuda(self.device_id)
+
+            indptr_cached_size = self.indptr.element_size(
+            ) * self.indptr.numel()
+            indices_cached_size = self.indices.element_size(
+            ) * self.indices.numel()
+            if self.probs is not None:
+                probs_cached_size = self.probs.element_size(
+                ) * self.probs.numel()
+
+        else:
+            if cache_nids.numel() > 0:
+                cache_nids = cache_nids.cuda(self.device_id)
+                self.cached_nids_hashed, self.cached_nids_in_gpu_hashed = torch.ops.dgs_ops._CAPI_create_cache_hashmap(
+                    cache_nids)
+
+                self.cached_indptr = torch.ops.dgs_ops._CAPI_get_sub_indptr(
+                    cache_nids, self.indptr).cuda(self.device_id)
+
+                self.cached_indices = torch.ops.dgs_ops._CAPI_get_sub_edge_data(
+                    cache_nids, self.indptr, self.cached_indptr,
+                    self.indices).cuda(self.device_id)
+
+                if self.probs is not None:
+                    self.cached_probs = torch.ops.dgs_ops._CAPI_get_sub_edge_data(
+                        cache_nids, self.indptr, self.cached_indptr,
+                        self.probs).cuda(self.device_id)
+
+                indptr_cached_size = self.cached_indptr.element_size(
+                ) * self.cached_indptr.numel()
+                indices_cached_size = self.cached_indices.element_size(
+                ) * self.cached_indices.numel()
+                if self.probs is not None:
+                    probs_cached_size = self.cached_probs.element_size(
+                    ) * self.cached_probs.numel()
+            else:
+                self.no_cache = True
+                indptr_cached_size = 0
+                indices_cached_size = 0
+                if self.probs is not None:
+                    probs_cached_size = 0
+
+        end = time.time()
+
+        print("GPU {} takes {:.3f} s to cache structure data".format(
+            self.device_id, end - start))
+        print(
+            "GPU {} Indptr cache size = {:.3f} GB, cache rate = {:.3f}".format(
+                self.device_id, indptr_cached_size / 1024 / 1024 / 1024,
+                indptr_cached_size /
+                (self.indptr.element_size() * self.indptr.numel())))
+        print("GPU {} Indices cache size = {:.3f} GB, cache rate = {:.3f}".
+              format(
+                  self.device_id, indices_cached_size / 1024 / 1024 / 1024,
+                  indices_cached_size /
+                  (self.indices.element_size() * self.indices.numel())))
+        if self.probs is not None:
+            print("GPU {} Probs cache size = {:.3f} GB, cache rate = {:.3f}".
+                  format(
+                      self.device_id, probs_cached_size / 1024 / 1024 / 1024,
+                      probs_cached_size /
+                      (self.probs.element_size() * self.probs.numel())))
+
+    def sample_neighbors(self,
+                         seeds_nids,
+                         fan_out,
+                         replace=False,
+                         count=False,
+                         sampling_heat=None,
+                         log_hit_rate=False):
+        seeds = seeds_nids.cuda(self.device_id)
+        blocks = []
+
+        for num_picks in reversed(fan_out):
+
+            if count:
+                sampling_heat[seeds] += 1
+
+            if self.full_cached:
+                if log_hit_rate:
+                    self.access_times += seeds.numel()
+                    self.hit_times += seeds.numel()
+                if self.probs is not None:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias(
+                        seeds, self.cached_indptr, self.cached_indices,
+                        self.cached_probs, num_picks, replace)
+                else:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors(
+                        seeds, self.cached_indptr, self.cached_indices,
+                        num_picks, replace)
+
+            elif self.no_cache:
+                if log_hit_rate:
+                    self.access_times += seeds.numel()
+                if self.probs is not None:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias(
+                        seeds, self.indptr, self.indices, self.probs,
+                        num_picks, replace)
+                else:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors(
+                        seeds, self.indptr, self.indices, num_picks, replace)
+
+            else:
+                if log_hit_rate:
+                    local_seeds_num = torch.ops.dgs_ops._CAPI_count_local_cache_nids(
+                        seeds, self.cached_nids_hashed,
+                        self.cached_nids_in_gpu_hashed)
+                    self.access_times += seeds.numel()
+                    self.hit_times += local_seeds_num
+                if self.probs is not None:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_bias_with_caching(
+                        seeds, self.cached_indptr, self.indptr,
+                        self.cached_indices, self.indices, self.cached_probs,
+                        self.probs, self.cached_nids_hashed,
+                        self.cached_nids_in_gpu_hashed, num_picks, replace)
+                else:
+                    coo_row, coo_col = torch.ops.dgs_ops._CAPI_sample_neighbors_with_caching(
+                        seeds, self.cached_indptr, self.indptr,
+                        self.cached_indices, self.indices,
+                        self.cached_nids_hashed,
+                        self.cached_nids_in_gpu_hashed, num_picks, replace)
+
+            frontier, (coo_row,
+                       coo_col) = torch.ops.dgs_ops._CAPI_tensor_relabel(
+                           [seeds, coo_col], [coo_row, coo_col])
+
+            block = dgl.create_block((coo_col, coo_row),
+                                     num_src_nodes=frontier.numel(),
+                                     num_dst_nodes=seeds.numel())
+            block.srcdata[dgl.NID] = frontier
+            block.dstdata[dgl.NID] = seeds
+            blocks.insert(0, block)
+
+            seeds = frontier
+
+        return frontier, seeds_nids, blocks
+
+    def print_hit_rate(self):
+        if self.access_times > 0:
+            print("GPU {}, structure cache hit rate = {:.3f}".format(
+                self.device_id, self.hit_times / self.access_times))
+        else:
+            print("GPU {} didn't log any hit information!".format(
+                self.device_id))
+
+    def clear_cache(self):
+        del self.cached_indptr
+        del self.cached_indices
+        if self.probs is not None:
+            del self.cached_probs
+        del self.cached_nids_in_gpu_hashed
+        del self.cached_nids_hashed
+
+        self.cached_indptr = None
+        self.cached_indices = None
+        self.cached_probs = None
+        self.cached_nids_hashed = None
+        self.cached_nids_in_gpu_hashed = None
+        self.full_cached = False
+        self.no_cache = False
+        self.access_times = 0
+        self.hit_times = 0
+
+
 class StructureP2PCacheServer:
 
     def __init__(self, indptr, indices, probs=None, process_group=None):

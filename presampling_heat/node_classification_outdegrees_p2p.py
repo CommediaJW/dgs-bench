@@ -8,9 +8,10 @@ import torchmetrics.functional as MF
 import time
 import numpy as np
 from utils.models import SAGE
-from GraphCache.cache import FeatureP2PCacheServer
+from GraphCache.cache import FeatureP2PCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
 from GraphCache.dist import create_p2p_communicator
+from preprocess_p2p import preprocess_for_cached_nids_out_degrees
 from utils.load_dataset import load_dataset
 from utils.structure_cache import StructureP2PCacheServer
 
@@ -86,14 +87,23 @@ def run(rank, world_size, data, args):
                                          args.batch_size,
                                          shuffle=True)
 
+    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
+    print("GPU {}, available memory size = {:.3f} GB".format(
+        rank, available_mem / 1024 / 1024 / 1024))
+    feature_cache_nids, feature_total_cache_nids_num = preprocess_for_cached_nids_out_degrees(
+        graph, available_mem, world_size, rank)
+
     # pin data
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_pin_memory(graph[key])
+    num_nodes = graph["indptr"].shape[0] - 1
 
     # cache data
     print("Rank {}, cache features...".format(rank))
     feature_server = FeatureP2PCacheServer(graph["features"])
-    feature_server.cache_data(torch.tensor([]), False)
+    feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_total_cache_nids_num,
+                              feature_cache_nids.numel() >= num_nodes)
 
     print("Rank {}, cache structures...".format(rank))
     if args.bias:
@@ -123,13 +133,14 @@ def run(rank, world_size, data, args):
             torch.cuda.synchronize()
             sampling_start = time.time()
             frontier, seeds, blocks = structure_server.sample_neighbors(
-                seed_nids, fan_out)
+                seed_nids, fan_out, log_hit_rate=args.log_hit_rate)
             blocks = [block.to(rank) for block in blocks]
             torch.cuda.synchronize()
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = feature_server.fetch_data(frontier).cuda()
+            batch_inputs = feature_server.fetch_data(
+                frontier, log_hit_rate=args.log_hit_rate).cuda()
             batch_labels = torch.ops.dgs_ops._CAPI_index(
                 graph["labels"], seeds)
             torch.cuda.synchronize()
@@ -160,6 +171,7 @@ def run(rank, world_size, data, args):
             print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
         dist.barrier()
 
+    dist.barrier()
     print(
         "Rank {} | Sampling {:.3f} ms | Loading {:.3f} ms | Training {:.3f} ms | Iteration {:.3f} ms | Epoch iterations num {} | Epoch time {:.3f} ms"
         .format(rank,
@@ -169,6 +181,10 @@ def run(rank, world_size, data, args):
                 np.mean(iteration_time_log[3:]) * 1000,
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
+
+    if args.log_hit_rate:
+        feature_server.print_hit_rate()
+        structure_server.print_hit_rate()
 
     for key in graph:
         torch.ops.dgs_ops._CAPI_tensor_unpin_memory(graph[key])
@@ -196,18 +212,19 @@ if __name__ == '__main__':
     parser.add_argument("--dataset",
                         default="ogbn-papers100M",
                         choices=["ogbn-products", "ogbn-papers100M"])
+    parser.add_argument('--log-hit-rate', action='store_true', default=False)
     parser.add_argument('--valid', action='store_true', default=False)
     args = parser.parse_args()
     torch.manual_seed(1)
+
+    n_procs = min(args.num_gpu, torch.cuda.device_count())
+    args.num_gpu = n_procs
+    print(args)
 
     if args.dataset == "ogbn-products":
         graph, num_classes = load_dataset(args.root, "ogbn-products")
     elif args.dataset == "ogbn-papers100M":
         graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
-
-    n_procs = min(args.num_gpu, torch.cuda.device_count())
-    args.num_gpu = n_procs
-    print(args)
 
     if args.bias:
         graph["probs"] = torch.randn(
