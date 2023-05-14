@@ -10,7 +10,7 @@ import numpy as np
 from utils.models import SAGE
 from GraphCache.cache import FeatureCacheServer, get_available_memory
 from GraphCache.dataloading import SeedGenerator
-from preprocess import preprocess_for_cached_nids_out_degrees, preprocess_for_cached_nids_heat
+from preprocess import preprocess_for_cached_nids_out_degrees
 from utils.load_dataset import load_dataset
 from utils.structure_cache import StructureCacheServer
 
@@ -89,7 +89,7 @@ def run(rank, world_size, data, args):
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
     feature_cache_nids = preprocess_for_cached_nids_out_degrees(
-        graph, available_mem, rank)
+        graph["features"], graph["out_degrees"], available_mem, rank)
 
     # pin data
     for key in graph:

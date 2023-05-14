@@ -4,17 +4,15 @@ import torch.distributed as dist
 from GraphCache.cache import get_node_value, get_cache_nids
 
 
-def preprocess_for_cached_nids_out_degrees(graph, available_mem, device_id):
+def preprocess_for_cached_nids_out_degrees(features, out_degrees,
+                                           available_mem, device_id):
     start = time.time()
 
-    avg_feature_size = graph["features"].shape[1] * graph[
-        "features"].element_size()
+    avg_feature_size = features.shape[1] * features.element_size()
 
-    cache_nids_num = min(available_mem // avg_feature_size,
-                         graph["features"].shape[0])
+    cache_nids_num = min(available_mem // avg_feature_size, features.shape[0])
 
-    cached_nids = torch.argsort(graph["out_degrees"],
-                                descending=True)[:cache_nids_num]
+    cached_nids = torch.argsort(out_degrees, descending=True)[:cache_nids_num]
 
     end = time.time()
     print(

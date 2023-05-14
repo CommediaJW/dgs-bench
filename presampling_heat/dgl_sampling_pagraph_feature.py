@@ -9,6 +9,8 @@ import time
 import dgl
 import numpy as np
 from utils.models import SAGE
+from preprocess import preprocess_for_cached_nids_out_degrees
+from GraphCache.cache import FeatureCacheServer, get_available_memory
 
 torch.ops.load_library("../GPU-Graph-Caching/build/libdgs.so")
 
@@ -48,23 +50,14 @@ def load_ogb(name, root="dataset"):
     return graph, num_labels
 
 
-def print_memory():
-    print("max_memory_allocated: {:.2f} GB, max_memory_reserved {:.2f} GB".
-          format(torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024,
-                 torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024))
-    print("memory_allocated {:.2f} GB, memory_reserved {:.2f} GB".format(
-        torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
-        torch.cuda.memory_reserved() / 1024 / 1024 / 1024))
-
-
-def evaluate(model, valid_dataloader, num_classes):
+def evaluate(model, valid_dataloader, num_classes, feature_server, labels):
     model.eval()
     ys = []
     y_hats = []
     for it, (input_nodes, output_nodes, blocks) in enumerate(valid_dataloader):
         with torch.no_grad():
-            batch_inputs = blocks[0].srcdata['features']
-            batch_labels = blocks[-1].dstdata['labels']
+            batch_inputs = feature_server.fetch_data(input_nodes)
+            batch_labels = torch.ops.dgs_ops._CAPI_index(labels, output_nodes)
             batch_pred = model(blocks, batch_inputs)
             ys.append(batch_labels)
             y_hats.append(batch_pred)
@@ -134,6 +127,22 @@ def run(rank, world_size, data, args):
             num_workers=0,
             use_uva=True)
 
+    features = graph.ndata.pop("features")
+    labels = graph.ndata.pop("labels")
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(features)
+    torch.ops.dgs_ops._CAPI_tensor_pin_memory(labels)
+    available_mem = get_available_memory(rank, 4.5 * 1024 * 1024 * 1024)
+    print("GPU {}, available memory size = {:.3f} GB".format(
+        rank, available_mem / 1024 / 1024 / 1024))
+    feature_cache_nids = preprocess_for_cached_nids_out_degrees(
+        features, graph.ndata["out_degrees"], available_mem, rank)
+
+    # cache data
+    print("Rank {}, cache features...".format(rank))
+    feature_server = FeatureCacheServer(features, device_id=rank)
+    feature_server.cache_data(feature_cache_nids.cuda(),
+                              feature_cache_nids.numel() >= graph.num_nodes())
+
     dist.barrier()
 
     if rank == 0:
@@ -155,8 +164,8 @@ def run(rank, world_size, data, args):
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = blocks[0].srcdata['features']
-            batch_labels = blocks[-1].dstdata['labels']
+            batch_inputs = feature_server.fetch_data(input_nodes)
+            batch_labels = torch.ops.dgs_ops._CAPI_index(labels, output_nodes)
             torch.cuda.synchronize()
             loading_end = time.time()
 
@@ -182,7 +191,8 @@ def run(rank, world_size, data, args):
         epoch_time_log.append(epoch_end - epoch_start)
 
         if args.valid and rank == 0:
-            acc = evaluate(model, valid_dataloader, num_classes)
+            acc = evaluate(model, valid_dataloader, num_classes,
+                           feature_server, labels)
             print("Epoch {}, valid acc = {:.3f}".format(epoch, acc))
         dist.barrier()
 
@@ -195,6 +205,9 @@ def run(rank, world_size, data, args):
                 np.mean(iteration_time_log[3:]) * 1000,
                 np.mean(epoch_iterations_log),
                 np.mean(epoch_time_log) * 1000))
+
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(features)
+    torch.ops.dgs_ops._CAPI_tensor_unpin_memory(labels)
 
 
 if __name__ == '__main__':
@@ -231,6 +244,10 @@ if __name__ == '__main__':
         graph, num_classes = load_ogb("ogbn-products", root=args.root)
     elif args.dataset == "ogbn-papers100M":
         graph, num_classes = load_ogb("ogbn-papers100M", root=args.root)
+
+    print("compute out degrees...")
+    graph.ndata["out_degrees"] = graph.out_degrees()
+
     graph = graph.formats('csc')
     graph.create_formats_()
     graph.edata.clear()
