@@ -143,8 +143,10 @@ def run(rank, world_size, data, args):
             sampling_end = time.time()
 
             loading_start = time.time()
-            batch_inputs = blocks[0].srcdata['features']
-            batch_labels = blocks[-1].dstdata['labels']
+            batch_inputs = torch.index_select(graph.ndata["features"], 0,
+                                              input_nodes).cuda()
+            batch_labels = torch.index_select(graph.ndata["labels"], 0,
+                                              output_nodes).cuda()
             torch.cuda.synchronize()
             loading_end = time.time()
 
