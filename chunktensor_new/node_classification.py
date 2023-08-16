@@ -213,10 +213,6 @@ if __name__ == '__main__':
 
     # partition train nodes
     train_nids = graph.pop("train_idx")
-    train_nids = torch.cat([
-        torch.randint(0, graph["indptr"].numel() - 1,
-                      (graph["indptr"].numel() // 10, )).long(), train_nids
-    ]).unique()
 
     train_nids = train_nids[torch.randperm(train_nids.shape[0])]
     num_train_nids_per_gpu = (train_nids.shape[0] + n_procs - 1) // n_procs
@@ -229,23 +225,9 @@ if __name__ == '__main__':
                                       num_train_nids_per_gpu]
         train_nids_list.append(local_train_nids.numpy())
 
+    graph["labels"] = graph["labels"].long()
+
     data = graph, num_classes, train_nids_list
-
-    #graph["labels"] = torch.maximum(
-    #    graph["labels"],
-    #    torch.tensor([num_classes - 1], dtype=graph["labels"].dtype))
-    #graph["labels"] = torch.minimum(
-    #    graph["labels"], torch.tensor([0], dtype=graph["labels"].dtype))
-
-    index = ~torch.isnan(graph["labels"])
-    print(index)
-    valid_label = graph["labels"][index]
-    print(valid_label)
-
-    graph["labels"][:] = 0
-    graph["labels"][index] = valid_label
-
-    print(graph["labels"].max(), graph["labels"].min())
 
     import torch.multiprocessing as mp
     mp.spawn(run, args=(n_procs, data, args), nprocs=n_procs)
