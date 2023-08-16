@@ -52,7 +52,7 @@ def run(rank, world_size, data, args):
                                      args.batch_size,
                                      shuffle=True)
 
-    available_mem = get_available_memory(rank, 5.5 * 1024 * 1024 * 1024)
+    available_mem = get_available_memory(rank, 3 * 1024 * 1024 * 1024)
     print("GPU {}, available memory size = {:.3f} GB".format(
         rank, available_mem / 1024 / 1024 / 1024))
 
@@ -178,9 +178,10 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help="Sample with bias.")
-    parser.add_argument("--dataset",
-                        default="ogbn-papers100M",
-                        choices=["ogbn-products", "ogbn-papers100M"])
+    parser.add_argument(
+        "--dataset",
+        default="ogbn-papers100M",
+        choices=["ogbn-products", "ogbn-papers100M", "ogbn-papers400M"])
     parser.add_argument(
         '--feat-cache-rate',
         default='1',
@@ -198,10 +199,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.manual_seed(1)
 
-    if args.dataset == "ogbn-products":
-        graph, num_classes = load_dataset(args.root, "ogbn-products")
-    elif args.dataset == "ogbn-papers100M":
-        graph, num_classes = load_dataset(args.root, "ogbn-papers100M")
+    graph, num_classes = load_dataset(args.root, args.dataset)
 
     n_procs = min(args.num_gpu, torch.cuda.device_count())
     args.num_gpu = n_procs
